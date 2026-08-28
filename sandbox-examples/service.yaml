@@ -11,7 +11,7 @@ spec:
   template:
     metadata:
       labels:
-        version: "v4-gen2"
+        version: "v6-interactions-api"
       annotations:
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/startup-cpu-boost: 'true'
@@ -20,9 +20,9 @@ spec:
       containerConcurrency: 80
       timeoutSeconds: 300
       containers:
-      # 1. Ingress Container: Python FastAPI Orchestrator
+      # 1. Ingress Container: Python FastAPI Orchestrator + Managed Agent
       - name: python-orchestrator
-        image: us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/python-orchestrator:latest
+        image: us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/python-orchestrator@sha256:4478fdadf3715dc6cb15b8a069ff2a7711f37fd1d413cdff15de132e39a7d8a2
         ports:
         - containerPort: 8080
           name: http1
@@ -31,10 +31,12 @@ spec:
           value: "http://localhost:8081"
         - name: SANDBOX_SECRET
           value: "internal-cloudrun-secret"
+        - name: GEMINI_MODEL
+          value: "gemini-2.5-flash"
         resources:
           limits:
             cpu: 1000m
-            memory: 512Mi
+            memory: 1Gi
         startupProbe:
           failureThreshold: 3
           periodSeconds: 10
