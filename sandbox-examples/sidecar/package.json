@@ -1,0 +1,9 @@
+{
+  "name": "computesdk-cloudrun-sidecar",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "ComputeSDK Official Native Cloud Run Gateway Sidecar",
+  "dependencies": {
+    "@computesdk/cloud-run": "^0.1.8"
+  }
+}

@@ -1,0 +1,64 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sandbox-sidecar
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      labels:
+        version: "v4-gen2"
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: 'true'
+        run.googleapis.com/container-dependencies: '{"python-orchestrator":["computesdk-sidecar"]}'
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+      # 1. Ingress Container: Python FastAPI Orchestrator
+      - name: python-orchestrator
+        image: us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/python-orchestrator:latest
+        ports:
+        - containerPort: 8080
+          name: http1
+        env:
+        - name: COMPUTESDK_URL
+          value: "http://localhost:8081"
+        - name: SANDBOX_SECRET
+          value: "internal-cloudrun-secret"
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        startupProbe:
+          failureThreshold: 3
+          periodSeconds: 10
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 5
+
+      # 2. Sidecar Container: Official ComputeSDK Native Gateway
+      - name: computesdk-sidecar
+        image: us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/computesdk-sidecar:latest
+        env:
+        - name: PORT
+          value: "8081"
+        - name: SANDBOX_SECRET
+          value: "internal-cloudrun-secret"
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        sandboxLauncher: true
+        startupProbe:
+          failureThreshold: 3
+          periodSeconds: 10
+          httpGet:
+            path: /v1/health
+            port: 8081
+          timeoutSeconds: 5
