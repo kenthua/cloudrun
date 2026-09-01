@@ -11,28 +11,38 @@ spec:
   template:
     metadata:
       labels:
-        version: "v6-interactions-api"
+        version: "v11-distinct-scenarios"
       annotations:
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/startup-cpu-boost: 'true'
         run.googleapis.com/container-dependencies: '{"python-orchestrator":["computesdk-sidecar"]}'
+        run.googleapis.com/network-interfaces: '[{"network":"general","subnetwork":"central"}]'
+        run.googleapis.com/vpc-access-egress: private-ranges-only
     spec:
       containerConcurrency: 80
       timeoutSeconds: 300
       containers:
       # 1. Ingress Container: Python FastAPI Orchestrator + Managed Agent
       - name: python-orchestrator
-        image: us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/python-orchestrator@sha256:4478fdadf3715dc6cb15b8a069ff2a7711f37fd1d413cdff15de132e39a7d8a2
+        image: us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/python-orchestrator:latest
         ports:
         - containerPort: 8080
           name: http1
         env:
         - name: COMPUTESDK_URL
           value: "http://localhost:8081"
+        - name: GKE_ROUTER_URL
+          value: "http://10.128.0.78:8080"
         - name: SANDBOX_SECRET
           value: "internal-cloudrun-secret"
         - name: GEMINI_MODEL
           value: "gemini-2.5-flash"
+        - name: GOOGLE_GENAI_USE_VERTEXAI
+          value: "true"
+        - name: GOOGLE_CLOUD_PROJECT
+          value: "kenthua-alto-agents"
+        - name: GOOGLE_CLOUD_LOCATION
+          value: "us-central1"
         resources:
           limits:
             cpu: 1000m
@@ -44,7 +54,7 @@ spec:
             port: 8080
           timeoutSeconds: 5
 
-      # 2. Sidecar Container: Official ComputeSDK Native Gateway
+      # 2. Sidecar Container: Official ComputeSDK Native Gateway (local fallback)
       - name: computesdk-sidecar
         image: us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/computesdk-sidecar:latest
         env:

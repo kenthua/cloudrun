@@ -1,49 +1,61 @@
+"""
+AgentRunner: Autonomous Agent Engine powered by Google GenAI (Gemini)
+Orchestrates multi-turn tool-calling and routes executions to GKE Agent Sandbox or Cloud Run Sidecar.
+"""
+
 import os
+import re
 import json
 import base64
 import logging
 from typing import Dict, Any, List, Optional
 import httpx
+from google import genai
+from google.genai import types
 
 logger = logging.getLogger("agent_runner")
 
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GKE_ROUTER_URL = os.environ.get("GKE_ROUTER_URL")
 
-# Function declaration for the Managed Agents / Interactions API
-SANDBOX_TOOL_DECLARATION = {
-    "type": "function",
-    "name": "execute_sandbox_code",
-    "description": "Executes code or shell commands inside the secure Cloud Run gVisor sandbox.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "Raw shell command to run (e.g. bash commands or compound scripts)."
-            },
-            "language": {
-                "type": "string",
-                "enum": ["python", "nodejs", "bash"],
-                "description": "Language runtime for code execution."
-            },
-            "code": {
-                "type": "string",
-                "description": "Source code to execute inside the sandbox."
-            },
-            "dependency": {
-                "type": "string",
-                "description": "Optional package to dynamically install (e.g. 'is-odd', 'numpy', 'requests')."
-            }
-        }
-    }
-}
+# Tool declaration for GenAI Chat / Function Calling
+SANDBOX_TOOL_DECLARATION = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="execute_sandbox_code",
+            description="Executes code or shell commands inside the secure gVisor sandbox.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "command": types.Schema(
+                        type=types.Type.STRING,
+                        description="Raw shell command to run (e.g. python3 -c '...' or bash script)."
+                    ),
+                    "language": types.Schema(
+                        type=types.Type.STRING,
+                        description="Language runtime: 'python', 'nodejs', 'bash'."
+                    ),
+                    "code": types.Schema(
+                        type=types.Type.STRING,
+                        description="Source code to execute inside the sandbox."
+                    ),
+                    "dependency": types.Schema(
+                        type=types.Type.STRING,
+                        description="Optional package to dynamically install (e.g. 'numpy', 'scipy', 'requests')."
+                    )
+                }
+            )
+        )
+    ]
+)
 
 class AgentRunner:
-    """Manages AI agent interactions and coordinates sandboxed execution tasks using the Interactions API."""
+    """Manages AI agent interactions and coordinates sandboxed execution tasks across Cloud Run and GKE."""
 
-    def __init__(self, sidecar_base_url: str, sandbox_secret: str):
+    def __init__(self, sidecar_base_url: str, sandbox_secret: str, gke_router_url: Optional[str] = None):
         self.sidecar_base_url = sidecar_base_url
         self.sandbox_secret = sandbox_secret
+        self.gke_router_url = gke_router_url or GKE_ROUTER_URL
         self.headers = {
             "Authorization": f"Bearer {sandbox_secret}",
             "Content-Type": "application/json"
@@ -52,28 +64,26 @@ class AgentRunner:
         self._init_genai_client()
 
     def _init_genai_client(self, api_key: Optional[str] = None):
-        """Initializes the Google Gen AI client with Vertex AI or AI Studio."""
+        """Initializes Google GenAI client with Vertex AI or AI Studio."""
         try:
-            from google import genai
-            
             effective_key = api_key or os.environ.get("GEMINI_API_KEY")
             if effective_key:
                 self.genai_client = genai.Client(api_key=effective_key)
                 logger.info("Initialized Google GenAI Client with API Key")
             elif os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("true", "1"):
-                vertex_project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("VERTEX_PROJECT")
+                vertex_project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("VERTEX_PROJECT", "kenthua-alto-agents")
                 vertex_location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
                 self.genai_client = genai.Client(
                     vertexai=True,
                     project=vertex_project,
                     location=vertex_location
                 )
-                logger.info("Initialized Google GenAI Client with Vertex AI")
+                logger.info("Initialized Google GenAI Client with Vertex AI (%s/%s)", vertex_project, vertex_location)
             else:
                 self.genai_client = genai.Client()
                 logger.info("Initialized Google GenAI Client with default environment")
         except Exception as e:
-            logger.warning(f"Could not initialize google-genai Client: {e}")
+            logger.warning("Could not initialize google-genai Client: %s", e)
             self.genai_client = None
 
     async def execute_in_sandbox(
@@ -83,9 +93,53 @@ class AgentRunner:
         language: Optional[str] = None,
         code: Optional[str] = None,
         dependency: Optional[str] = None,
-        timeout: int = 45000
+        session_id: Optional[str] = None,
+        timeout: int = 45000,
+        backend: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Executes code or command inside the Cloud Run gVisor sandbox via the ComputeSDK sidecar."""
+        """Executes code or command inside the gVisor sandbox via GKE Router or local ComputeSDK sidecar."""
+        target_backend = backend or ("gke" if self.gke_router_url else "sidecar")
+
+        # 1. Route via GKE Agent Sandbox Router if requested or configured
+        if target_backend == "gke" and self.gke_router_url:
+            payload = {
+                "command": command,
+                "language": language or "python",
+                "code": code,
+                "dependency": dependency,
+                "session_id": session_id or "default",
+                "timeout": float(timeout / 1000)
+            }
+            try:
+                res = await http_client.post(
+                    f"{self.gke_router_url}/execute",
+                    json=payload,
+                    timeout=float(timeout / 1000 + 10)
+                )
+                if res.status_code != 200:
+                    return {
+                        "stdout": "",
+                        "stderr": f"GKE Router Error HTTP {res.status_code}: {res.text}",
+                        "exit_code": 1
+                    }
+                data = res.json()
+                return {
+                    "stdout": data.get("stdout", ""),
+                    "stderr": data.get("stderr", ""),
+                    "exit_code": data.get("exit_code", 0),
+                    "pod_ip": data.get("pod_ip"),
+                    "claim_name": data.get("claim_name"),
+                    "backend": "gke-agent-sandbox"
+                }
+            except Exception as e:
+                logger.error("Error executing via GKE Router: %s", e)
+                return {
+                    "stdout": "",
+                    "stderr": f"Failed connecting to GKE Router: {str(e)}",
+                    "exit_code": 1
+                }
+
+        # 2. Execute via Local In-Container Cloud Run Sidecar
         if not command:
             if language in ("python", "python3", "py"):
                 install_prefix = f"pip install --no-cache-dir {dependency} >&2 && " if dependency else ""
@@ -136,9 +190,12 @@ class AgentRunner:
         prompt: str,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
-        max_iterations: int = 5
+        previous_interaction_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        max_iterations: int = 5,
+        backend: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Runs an autonomous coding agent loop using the Google GenAI Interactions API."""
+        """Runs an autonomous coding agent loop with Vertex AI / Gemini and GKE Sandbox execution."""
         if api_key:
             self._init_genai_client(api_key=api_key)
         elif not self.genai_client:
@@ -151,10 +208,11 @@ class AgentRunner:
 
         selected_model = model or DEFAULT_MODEL
         execution_steps: List[Dict[str, Any]] = []
+        active_session_id = session_id or previous_interaction_id or "default-agent-session"
 
         system_instruction = (
-            "You are an expert autonomous software engineer operating inside a secure Cloud Run sandbox environment.\n"
-            "You have access to a tool named `execute_sandbox_code` to run shell, Python, or Node.js code.\n"
+            "You are an expert autonomous software engineer operating inside a secure gVisor sandbox environment.\n"
+            "You have access to a tool named `execute_sandbox_code` to run shell or Python code.\n"
             "Workflow:\n"
             "1. Analyze the user's coding request.\n"
             "2. Formulate code and execute it in the sandbox using `execute_sandbox_code`.\n"
@@ -163,57 +221,44 @@ class AgentRunner:
         )
 
         try:
-            current_input: Any = prompt
-            previous_interaction_id: Optional[str] = None
+            # Create a multi-turn chat session with function calling
+            chat = self.genai_client.chats.create(
+                model=selected_model,
+                config=types.GenerateContentConfig(
+                    tools=[SANDBOX_TOOL_DECLARATION],
+                    system_instruction=system_instruction,
+                    temperature=0.2
+                )
+            )
+
+            current_message: Any = prompt
             final_output_text: str = ""
 
             for turn in range(max_iterations):
-                # Call the Managed Agents / Interactions API
-                if previous_interaction_id:
-                    interaction = self.genai_client.interactions.create(
-                        model=selected_model,
-                        previous_interaction_id=previous_interaction_id,
-                        input=current_input,
-                        tools=[SANDBOX_TOOL_DECLARATION]
-                    )
-                else:
-                    interaction = self.genai_client.interactions.create(
-                        model=selected_model,
-                        system_instruction=system_instruction,
-                        input=current_input,
-                        tools=[SANDBOX_TOOL_DECLARATION]
-                    )
+                response = chat.send_message(current_message)
 
-                previous_interaction_id = interaction.id
-
-                function_calls = []
-                if interaction.steps:
-                    for step in interaction.steps:
-                        step_type = getattr(step, "type", "")
-                        if step_type == "thought":
-                            summary = getattr(step, "summary", "") or getattr(step, "text", "")
-                            if summary:
-                                execution_steps.append({"type": "thought", "content": summary})
-                        elif step_type == "function_call":
-                            function_calls.append(step)
-
-                if getattr(interaction, "status", "") == "completed" or not function_calls:
-                    final_output_text = interaction.output_text or ""
+                # Check if model made function calls
+                if not response.function_calls:
+                    final_output_text = response.text or ""
                     break
 
-                tool_results = []
-                for fc in function_calls:
-                    fc_name = getattr(fc, "name", "")
-                    fc_id = getattr(fc, "id", None)
-                    fc_args = getattr(fc, "arguments", {}) or {}
+                tool_response_parts = []
+                for fc in response.function_calls:
+                    fc_name = fc.name
+                    fc_args = fc.args or {}
 
                     if fc_name == "execute_sandbox_code":
+                        cmd = fc_args.get("command")
+                        code = fc_args.get("code")
+
                         sandbox_res = await self.execute_in_sandbox(
                             http_client=http_client,
-                            command=fc_args.get("command"),
-                            language=fc_args.get("language"),
-                            code=fc_args.get("code"),
-                            dependency=fc_args.get("dependency")
+                            command=cmd,
+                            language=fc_args.get("language", "python"),
+                            code=code,
+                            dependency=fc_args.get("dependency"),
+                            session_id=active_session_id,
+                            backend=backend
                         )
 
                         execution_steps.append({
@@ -223,34 +268,34 @@ class AgentRunner:
                             "result": sandbox_res
                         })
 
-                        tool_results.append({
-                            "type": "function_result",
-                            "id": fc_id,
-                            "name": fc_name,
-                            "result": sandbox_res
-                        })
+                        tool_response_parts.append(
+                            types.Part.from_function_response(
+                                name=fc_name,
+                                response={"result": sandbox_res}
+                            )
+                        )
                     else:
-                        tool_results.append({
-                            "type": "function_result",
-                            "id": fc_id,
-                            "name": fc_name,
-                            "result": {"error": f"Unknown tool: {fc_name}"}
-                        })
+                        tool_response_parts.append(
+                            types.Part.from_function_response(
+                                name=fc_name,
+                                response={"error": f"Unknown tool: {fc_name}"}
+                            )
+                        )
 
-                current_input = tool_results
+                current_message = tool_response_parts
             else:
                 final_output_text = "Agent reached maximum iteration turns."
 
             return {
                 "status": "success",
                 "model": selected_model,
-                "interaction_id": previous_interaction_id,
+                "session_id": active_session_id,
                 "steps": execution_steps,
                 "output": final_output_text
             }
 
         except Exception as e:
-            logger.error(f"Error during Interactions API execution: {e}", exc_info=True)
+            logger.error("Error during Agent execution: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "error": str(e),
