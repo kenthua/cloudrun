@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Scenario 1: Cloud Run In-Container Sidecar Sandbox (Bash / cURL)
+# Scenario 1: Cloud Run In-Container Sandbox (Bash / cURL)
 # ==============================================================================
 set -euo pipefail
 
+REGION="${REGION:-us-central1}"
+SERVICE_NAME="${SERVICE_NAME:-sandbox-sidecar}"
+
 TOKEN=$(gcloud auth print-identity-token 2>/dev/null || echo "")
-SERVICE_URL=$(gcloud run services describe sandbox-sidecar --region us-central1 --format="value(status.url)")
+SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" --region "${REGION}" --format="value(status.url)")
 
 echo "================================================================================"
 echo "🚀 SCENARIO 1: CLOUD RUN IN-CONTAINER SIDECAR SANDBOX (/sandbox/exec)"
-echo "Service URL: ${SERVICE_URL}"
+echo "Target Service: ${SERVICE_NAME} (${REGION})"
 echo "================================================================================"
 
 echo ""
@@ -29,6 +32,6 @@ curl -s -X POST "${SERVICE_URL}/sandbox/exec" \
   -H "Content-Type: application/json" \
   -d '{
     "language": "nodejs",
-    "dependency": "is-odd",
-    "code": "const isOdd = require(\"is-odd\"); console.log(\"Is 99 odd?\", isOdd(99));"
+    "code": "const isOdd = require(\"is-odd\"); console.log(\"Is 99 odd? \" + isOdd(99));",
+    "dependency": "is-odd"
   }' | jq .

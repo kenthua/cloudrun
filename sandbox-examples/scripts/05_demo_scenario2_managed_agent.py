@@ -6,6 +6,7 @@ Demonstrates autonomous multi-turn reasoning where Gemini formulates solutions,
 invokes the code sandbox tool, inspects stdout/stderr, and self-corrects.
 """
 
+import os
 import subprocess
 import httpx
 import json
@@ -19,14 +20,15 @@ def get_auth_token():
         return ""
 
 def get_service_url():
+    service_name = os.environ.get("SERVICE_NAME", "sandbox-sidecar")
+    region = os.environ.get("REGION", "us-central1")
+    cmd = ["gcloud", "run", "services", "describe", service_name, "--region", region, "--format=value(status.url)"]
     try:
-        res = subprocess.run(
-            ["gcloud", "run", "services", "describe", "sandbox-sidecar", "--region", "us-central1", "--format", "value(status.url)"],
-            capture_output=True, text=True, check=True
-        )
-        return res.stdout.strip()
-    except Exception:
-        return "https://sandbox-sidecar-739169254157.us-central1.run.app"
+        url = subprocess.check_output(cmd, text=True).strip()
+        if url:
+            return url
+    except Exception as e:
+        raise RuntimeError(f"Failed to query Cloud Run URL for '{service_name}' in '{region}': {e}")
 
 def main():
     service_url = get_service_url()
@@ -37,36 +39,42 @@ def main():
 
     print("=" * 80)
     print("🤖 SCENARIO 2: MANAGED AGENT AI REASONING LOOP (VERTEX AI GEMINI)")
-    print(f"Target Endpoint: {service_url}/agent/task")
+    print("Target Service: sandbox-sidecar (/sandbox/agent/task)")
     print("=" * 80)
 
     # Task 1: Autonomous mathematical calculation & verification
     prompt_1 = "Calculate 15 squared plus the square root of 144 using Python and print the result."
     print(f"\n[Task 1/2] Sending Prompt: \"{prompt_1}\"")
-    resp1 = httpx.post(
-        f"{service_url}/agent/task",
-        headers=headers,
-        json={"prompt": prompt_1, "session_id": "managed-agent-demo"},
-        timeout=60.0
-    )
-    print(f"Status Code: {resp1.status_code}")
-    data1 = resp1.json()
-    print(f"Turns taken: {len(data1.get('steps', []))}")
-    print(f"Final Model Output:\n{data1.get('output', '')}")
+    payload_1 = {
+        "prompt": prompt_1,
+        "backend": "sidecar",
+        "max_iterations": 5
+    }
 
-    # Task 2: Multi-step data manipulation with sidecar backend
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.post(f"{service_url}/sandbox/agent/task", json=payload_1, headers=headers)
+        print(f"Status Code: {resp.status_code}")
+        data = resp.json()
+        print(f"Turns taken: {len(data.get('steps', []))}")
+        print("Final Model Output:")
+        print(data.get("output"))
+
+    # Task 2: Multi-step simulation on sidecar
     prompt_2 = "Simulate 10 rolls of a 6-sided die, compute the average, and output whether it is above 3.5."
     print(f"\n[Task 2/2] Sending Prompt on local sidecar backend: \"{prompt_2}\"")
-    resp2 = httpx.post(
-        f"{service_url}/sandbox/agent/task",
-        headers=headers,
-        json={"prompt": prompt_2, "session_id": "managed-agent-demo"},
-        timeout=60.0
-    )
-    print(f"Status Code: {resp2.status_code}")
-    data2 = resp2.json()
-    print(f"Turns taken: {len(data2.get('steps', []))}")
-    print(f"Final Model Output:\n{data2.get('output', '')}")
+    payload_2 = {
+        "prompt": prompt_2,
+        "backend": "sidecar",
+        "max_iterations": 5
+    }
+
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.post(f"{service_url}/sandbox/agent/task", json=payload_2, headers=headers)
+        print(f"Status Code: {resp.status_code}")
+        data = resp.json()
+        print(f"Turns taken: {len(data.get('steps', []))}")
+        print("Final Model Output:")
+        print(data.get("output"))
 
     print("\n" + "=" * 80)
     print("✅ Scenario 2 Demonstration Complete!")

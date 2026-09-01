@@ -11,6 +11,7 @@ import time
 import base64
 import asyncio
 import logging
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Header
@@ -26,7 +27,7 @@ NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "default")
 WARMPOOL_NAME = os.environ.get("WARMPOOL_NAME", "python-runtime-warmpool")
 TEMPLATE_NAME = os.environ.get("SANDBOX_TEMPLATE_NAME", "python-runtime-template")
 SANDBOX_PORT = int(os.environ.get("SANDBOX_PORT", "8888"))
-SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "600")) # 10 min default TTL
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "300")) # 5 min default TTL
 
 # Initialize Kubernetes Client
 try:
@@ -63,7 +64,7 @@ async def remove_claim_k8s(claim_name: str) -> bool:
             plural="sandboxclaims",
             name=claim_name,
         )
-        logger.info("Successfully deleted SandboxClaim %s", claim_name)
+        logger.info("Successfully deleted SandboxClaim %s from cluster", claim_name)
         return True
     except ApiException as e:
         if e.status == 404:
@@ -72,28 +73,60 @@ async def remove_claim_k8s(claim_name: str) -> bool:
         logger.error("Failed to delete SandboxClaim %s: %s", claim_name, e)
         return False
 
+async def sweep_all_expired_claims():
+    """Queries GKE API and deletes all SandboxClaims older than SESSION_TTL_SECONDS."""
+    try:
+        claims_list = k8s_custom.list_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1alpha1",
+            namespace=NAMESPACE,
+            plural="sandboxclaims"
+        )
+        items = claims_list.get("items", [])
+        now_utc = datetime.now(timezone.utc)
+        logger.info("Claim Sweeper inspecting %d active SandboxClaims...", len(items))
+
+        for item in items:
+            name = item.get("metadata", {}).get("name", "")
+            ts_str = item.get("metadata", {}).get("creationTimestamp")
+            if not ts_str or not name:
+                continue
+
+            try:
+                created_at = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                age_sec = (now_utc - created_at).total_seconds()
+            except Exception:
+                age_sec = SESSION_TTL_SECONDS + 1
+
+            # Check if recently used in memory cache
+            matching_cache = [s for s, d in SESSION_CACHE.items() if d.get("claim_name") == name]
+            is_active_in_cache = False
+            if matching_cache:
+                sess_id = matching_cache[0]
+                last_used = SESSION_CACHE[sess_id].get("last_used", 0)
+                if time.time() - last_used < SESSION_TTL_SECONDS:
+                    is_active_in_cache = True
+
+            if age_sec > SESSION_TTL_SECONDS and not is_active_in_cache:
+                logger.info("Reclaiming expired SandboxClaim '%s' (Age: %.1fs > TTL %ss)", name, age_sec, SESSION_TTL_SECONDS)
+                if matching_cache:
+                    SESSION_CACHE.pop(matching_cache[0], None)
+                await remove_claim_k8s(name)
+
+    except Exception as e:
+        logger.error("Error inspecting/sweeping claims from Kubernetes: %s", e)
+
 async def inactivity_sweeper():
-    """Background task that sweeps and deletes SandboxClaims inactive beyond SESSION_TTL_SECONDS."""
-    logger.info("Starting inactivity sweeper with TTL=%ss", SESSION_TTL_SECONDS)
+    """Background loop that periodically sweeps inactive claims."""
+    logger.info("Starting background cluster-wide claim sweeper (TTL=%ss, Interval=30s)", SESSION_TTL_SECONDS)
     while True:
         try:
-            await asyncio.sleep(60) # Sweep every 60 seconds
-            now = time.time()
-            expired_sessions = [
-                sess_id for sess_id, data in list(SESSION_CACHE.items())
-                if now - data.get("last_used", now) > SESSION_TTL_SECONDS
-            ]
-            for sess_id in expired_sessions:
-                data = SESSION_CACHE.pop(sess_id, None)
-                if data:
-                    claim_name = data.get("claim_name")
-                    logger.info("Session '%s' (claim %s) expired due to inactivity (%ss). Reclaiming...", sess_id, claim_name, SESSION_TTL_SECONDS)
-                    if claim_name:
-                        await remove_claim_k8s(claim_name)
+            await asyncio.sleep(30) # Run every 30 seconds
+            await sweep_all_expired_claims()
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error("Error during inactivity sweep: %s", e)
+            logger.error("Error in background sweeper task: %s", e)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -108,7 +141,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="GKE Agent Sandbox Router",
     description="Gateway for managing and executing code within GKE gVisor Agent Sandboxes",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan
 )
 
@@ -323,3 +356,9 @@ async def delete_claim(session_id: str):
         return {"status": "deleted", "claim_name": claim_name, "session_id": session_id}
     else:
         return {"status": "error", "claim_name": claim_name, "session_id": session_id}
+
+@app.post("/claims/sweep")
+async def manual_sweep():
+    """Forces an immediate sweep of all expired claims."""
+    await sweep_all_expired_claims()
+    return {"status": "sweep_completed"}
