@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Deploys the multi-container Cloud Run Orchestrator & Sidecar service
+# 03. Deploys the multi-container Cloud Run Orchestrator & Sidecar service
 # ==============================================================================
 set -euo pipefail
 

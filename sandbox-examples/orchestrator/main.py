@@ -56,6 +56,7 @@ class ExecRequest(BaseModel):
     code: Optional[str] = Field(None, description="Source code to execute")
     dependency: Optional[str] = Field(None, description="Optional package to dynamically install (e.g. numpy, is-odd)")
     session_id: Optional[str] = Field(None, description="Optional session ID for stateful execution")
+    ephemeral: Optional[bool] = Field(False, description="If True, releases the sandbox instance immediately after completion")
     backend: Optional[str] = Field(None, description="Explicit backend target: 'sidecar' (Cloud Run local), 'gke' (GKE warmpool), or 'auto'")
     write: bool = Field(True, description="Enable filesystem write access inside the sandbox")
     allow_egress: bool = Field(True, description="Allow external network egress inside the sandbox")
@@ -80,50 +81,52 @@ class AgentTaskRequest(BaseModel):
     max_iterations: int = Field(5, ge=1, le=10, description="Maximum agent tool-calling turns")
 
 # ---------------------------------------------------------------------------
-# API Routes
+# Core Execution Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/")
-async def root():
+@app.get("/healthz")
+@app.get("/health")
+def health():
     return {
-        "service": "Python Orchestrator & Managed Agent",
-        "scenarios": [
-            "1. Cloud Run In-Container Sandbox (/sandbox/exec)",
-            "2. Managed Agents AI Loop (/agent/task)",
-            "3. GKE Agent Sandbox Distributed Warmpool (/gke/exec, /gke/agent/task)"
-        ],
-        "default_backend": "gke-sandbox-router" if GKE_ROUTER_URL else "cloudrun-computesdk-sidecar",
-        "router_url": GKE_ROUTER_URL or SIDECAR_BASE_URL,
-        "mode": "optimized-multi-container-gen2",
-        "status": "ready"
+        "status": "healthy",
+        "service": "python-orchestrator",
+        "sidecar_url": SIDECAR_BASE_URL,
+        "gke_router_url": GKE_ROUTER_URL or "disabled"
     }
 
 @app.get("/status")
 async def status_check():
-    """Validates connectivity to the sandbox backend (GKE Router or local ComputeSDK sidecar)."""
+    """Diagnostics endpoint reporting health of both sidecar and GKE Router."""
     client: httpx.AsyncClient = state["http_client"]
+    sidecar_ok = False
+    gke_ok = False
+    details = {}
+
     try:
-        health_path = "/health" if GKE_ROUTER_URL else "/v1/health"
-        res = await client.get(health_path, timeout=3.0)
-        if res.status_code == 200:
-            return {
-                "status": "healthy",
-                "backend": "gke-sandbox-router" if GKE_ROUTER_URL else "cloudrun-sidecar",
-                "details": res.json()
-            }
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "unhealthy", "backend_status": res.status_code}
-        )
+        r = await client.get(f"{SIDECAR_BASE_URL}/healthz", timeout=2.0)
+        sidecar_ok = (r.status_code == 200)
     except Exception as e:
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "unhealthy", "error": str(e)}
-        )
+        details["sidecar_error"] = str(e)
+
+    if GKE_ROUTER_URL:
+        try:
+            r = await client.get(f"{GKE_ROUTER_URL}/health", timeout=3.0)
+            gke_ok = (r.status_code == 200)
+            if gke_ok:
+                details["gke_router"] = r.json()
+        except Exception as e:
+            details["gke_router_error"] = str(e)
+
+    return {
+        "status": "ok" if (sidecar_ok or gke_ok) else "degraded",
+        "sidecar_connected": sidecar_ok,
+        "gke_router_connected": gke_ok,
+        "details": details
+    }
 
 @app.post("/exec", response_model=ExecResponse)
 async def execute_code(req: ExecRequest):
-    """Dynamic code execution with optional backend selection ('sidecar' or 'gke')."""
+    """Unified execution endpoint supporting code, shell commands, and backend routing."""
     client: httpx.AsyncClient = state["http_client"]
     runner: AgentRunner = state["agent_runner"]
 
@@ -137,7 +140,8 @@ async def execute_code(req: ExecRequest):
             dependency=req.dependency,
             session_id=req.session_id,
             timeout=req.timeout_ms,
-            backend=req.backend
+            backend=req.backend,
+            ephemeral=req.ephemeral
         )
         duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
         return ExecResponse(
@@ -207,6 +211,14 @@ async def run_sandbox_agent_task(req: AgentTaskRequest):
     req.backend = "sidecar"
     return await run_agent_task(req)
 
+@app.delete("/session/{session_id}")
+@app.delete("/gke/session/{session_id}")
+async def delete_session(session_id: str):
+    """Releases and deletes a session's SandboxClaim on GKE."""
+    client: httpx.AsyncClient = state["http_client"]
+    runner: AgentRunner = state["agent_runner"]
+    return await runner.delete_session(client, session_id)
+
 # Backward-compatible convenience endpoints
 @app.get("/python")
 async def legacy_python():
@@ -219,4 +231,4 @@ async def legacy_nodejs():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, workers=1)
+    uvicorn.run(app, host="0.0.0.0", port=port)

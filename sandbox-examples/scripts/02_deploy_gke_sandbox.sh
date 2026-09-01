@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Deploys GKE Agent Sandbox manifests and Sandbox Router
+# 02. Deploys GKE Agent Sandbox manifests and Router Gateway
 # ==============================================================================
 set -euo pipefail
 

@@ -2,6 +2,7 @@
 GKE Agent Sandbox Router & Gateway Service
 Bridges Cloud Run (or external callers) to GKE gVisor Agent Sandboxes.
 Manages SandboxClaim lifecycle against extensions.agents.x-k8s.io/v1alpha1.
+Supports stateful multi-turn sessions, ephemeral auto-delete execution, and background TTL sweeping.
 """
 
 import os
@@ -10,6 +11,7 @@ import time
 import base64
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel, Field
@@ -24,6 +26,7 @@ NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", "default")
 WARMPOOL_NAME = os.environ.get("WARMPOOL_NAME", "python-runtime-warmpool")
 TEMPLATE_NAME = os.environ.get("SANDBOX_TEMPLATE_NAME", "python-runtime-template")
 SANDBOX_PORT = int(os.environ.get("SANDBOX_PORT", "8888"))
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "600")) # 10 min default TTL
 
 # Initialize Kubernetes Client
 try:
@@ -39,12 +42,6 @@ except Exception:
 k8s_custom = client.CustomObjectsApi()
 k8s_core = client.CoreV1Api()
 
-app = FastAPI(
-    title="GKE Agent Sandbox Router",
-    description="Gateway for managing and executing code within GKE gVisor Agent Sandboxes",
-    version="1.0.0",
-)
-
 # In-memory session cache: session_id -> { "claim_name": ..., "pod_ip": ..., "last_used": ... }
 SESSION_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -55,6 +52,65 @@ def sanitize_session_id(session_id: str) -> str:
     if not clean:
         clean = "default"
     return clean[:35]
+
+async def remove_claim_k8s(claim_name: str) -> bool:
+    """Deletes a SandboxClaim object in Kubernetes."""
+    try:
+        k8s_custom.delete_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1alpha1",
+            namespace=NAMESPACE,
+            plural="sandboxclaims",
+            name=claim_name,
+        )
+        logger.info("Successfully deleted SandboxClaim %s", claim_name)
+        return True
+    except ApiException as e:
+        if e.status == 404:
+            logger.info("SandboxClaim %s already deleted", claim_name)
+            return True
+        logger.error("Failed to delete SandboxClaim %s: %s", claim_name, e)
+        return False
+
+async def inactivity_sweeper():
+    """Background task that sweeps and deletes SandboxClaims inactive beyond SESSION_TTL_SECONDS."""
+    logger.info("Starting inactivity sweeper with TTL=%ss", SESSION_TTL_SECONDS)
+    while True:
+        try:
+            await asyncio.sleep(60) # Sweep every 60 seconds
+            now = time.time()
+            expired_sessions = [
+                sess_id for sess_id, data in list(SESSION_CACHE.items())
+                if now - data.get("last_used", now) > SESSION_TTL_SECONDS
+            ]
+            for sess_id in expired_sessions:
+                data = SESSION_CACHE.pop(sess_id, None)
+                if data:
+                    claim_name = data.get("claim_name")
+                    logger.info("Session '%s' (claim %s) expired due to inactivity (%ss). Reclaiming...", sess_id, claim_name, SESSION_TTL_SECONDS)
+                    if claim_name:
+                        await remove_claim_k8s(claim_name)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Error during inactivity sweep: %s", e)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    sweeper_task = asyncio.create_task(inactivity_sweeper())
+    yield
+    sweeper_task.cancel()
+    try:
+        await sweeper_task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(
+    title="GKE Agent Sandbox Router",
+    description="Gateway for managing and executing code within GKE gVisor Agent Sandboxes",
+    version="1.1.0",
+    lifespan=lifespan
+)
 
 async def get_or_create_sandbox_claim(session_id: str) -> str:
     """
@@ -168,6 +224,7 @@ class ExecuteRequest(BaseModel):
     language: Optional[str] = "python"
     dependency: Optional[str] = None
     session_id: Optional[str] = "default"
+    ephemeral: Optional[bool] = Field(False, description="If True, releases and deletes the SandboxClaim immediately after execution")
     timeout: Optional[float] = 60.0
 
 class ExecuteResponse(BaseModel):
@@ -184,6 +241,7 @@ def health_check():
         "status": "ok",
         "service": "gke-agent-sandbox-router",
         "active_sessions": len(SESSION_CACHE),
+        "session_ttl_seconds": SESSION_TTL_SECONDS,
         "namespace": NAMESPACE,
         "warmpool": WARMPOOL_NAME,
     }
@@ -199,6 +257,7 @@ async def execute_in_sandbox(
     """
     Executes a command or code snippet inside the GKE gVisor sandbox.
     Automatically claims a warmpool instance if the session is new.
+    If req.ephemeral is True, the claim is released immediately upon completion.
     """
     session_id = x_sandbox_session_id or req.session_id or "default"
     pod_ip = await get_or_create_sandbox_claim(session_id)
@@ -219,7 +278,7 @@ async def execute_in_sandbox(
         raise HTTPException(status_code=400, detail="Must provide either 'command' or 'code'")
 
     target_url = f"http://{pod_ip}:{SANDBOX_PORT}/execute"
-    logger.info("Executing on Sandbox Pod (%s) for session '%s': %s", pod_ip, session_id, command[:100])
+    logger.info("Executing on Sandbox Pod (%s) for session '%s' (ephemeral=%s): %s", pod_ip, session_id, req.ephemeral, command[:100])
 
     try:
         async with httpx.AsyncClient(timeout=req.timeout or 60.0) as client_http:
@@ -245,23 +304,22 @@ async def execute_in_sandbox(
     except httpx.RequestError as exc:
         logger.error("HTTP error connecting to Sandbox Pod %s: %s", pod_ip, exc)
         raise HTTPException(status_code=502, detail=f"Failed to communicate with Sandbox Pod {pod_ip}: {str(exc)}")
+    finally:
+        if req.ephemeral:
+            logger.info("Ephemeral mode requested for session '%s'. Reclaiming %s immediately.", session_id, claim_name)
+            SESSION_CACHE.pop(session_id, None)
+            await remove_claim_k8s(claim_name)
 
 @app.delete("/v1/sandbox/claim/{session_id}")
+@app.delete("/claim/{session_id}")
+@app.delete("/session/{session_id}")
 async def delete_claim(session_id: str):
-    """Releases and deletes a SandboxClaim, returning resources to the cluster."""
+    """Releases and deletes a SandboxClaim, returning resources to the warmpool."""
     clean_id = sanitize_session_id(session_id)
     claim_name = f"claim-{clean_id}"
-    try:
-        k8s_custom.delete_namespaced_custom_object(
-            group="extensions.agents.x-k8s.io",
-            version="v1alpha1",
-            namespace=NAMESPACE,
-            plural="sandboxclaims",
-            name=claim_name,
-        )
-        SESSION_CACHE.pop(session_id, None)
-        return {"status": "deleted", "claim_name": claim_name}
-    except ApiException as e:
-        if e.status == 404:
-            return {"status": "not_found", "claim_name": claim_name}
-        raise HTTPException(status_code=500, detail=f"Failed to delete claim: {e.reason}")
+    SESSION_CACHE.pop(session_id, None)
+    success = await remove_claim_k8s(claim_name)
+    if success:
+        return {"status": "deleted", "claim_name": claim_name, "session_id": session_id}
+    else:
+        return {"status": "error", "claim_name": claim_name, "session_id": session_id}

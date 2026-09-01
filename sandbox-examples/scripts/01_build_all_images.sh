@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Builds and pushes all container images using Cloud Build and uv
+# 01. Builds and pushes all container images using Cloud Build and uv
 # ==============================================================================
 set -euo pipefail
 

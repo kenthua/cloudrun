@@ -10,10 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN uv pip install --system --no-cache -r requirements.txt
+# Install project dependencies directly from pyproject.toml using uv
+COPY pyproject.toml ./
+RUN uv pip install --system --no-cache -r pyproject.toml
 
-COPY main.py .
+COPY main.py ./
 
 EXPOSE 8080
 

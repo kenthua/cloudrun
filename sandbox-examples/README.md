@@ -77,9 +77,8 @@ The service uses a **Nested Defense-in-Depth** model:
 .
 ├── gke-router/
 │   ├── Dockerfile                 # Python 3.11 container with uv for fast installs
-│   ├── pyproject.toml             # uv / standard project packaging
-│   ├── main.py                    # FastAPI gateway managing SandboxClaims & execution proxies
-│   └── requirements.txt           # fastapi, uvicorn, httpx, kubernetes, pydantic
+│   ├── pyproject.toml             # uv / standard project packaging (no requirements.txt needed)
+│   └── main.py                    # FastAPI gateway managing SandboxClaims & execution proxies
 │
 ├── k8s/
 │   ├── 00-sandbox-template.yaml   # Official GKE SandboxTemplate blueprint (gVisor runtime)
@@ -91,20 +90,21 @@ The service uses a **Nested Defense-in-Depth** model:
 │
 ├── orchestrator/
 │   ├── Dockerfile                 # Python 3.11 container with uv for fast installs
-│   ├── pyproject.toml             # uv / standard project packaging
+│   ├── pyproject.toml             # uv / standard project packaging (no requirements.txt needed)
 │   ├── main.py                    # Ingress FastAPI orchestrator with connection pooling
-│   ├── agent_runner.py            # Vertex AI Gemini agent loop & session routing
-│   └── requirements.txt           # fastapi, uvicorn, httpx, pydantic, google-genai
+│   └── agent_runner.py            # Vertex AI Gemini agent loop & session routing
 │
 ├── sidecar/
 │   ├── Dockerfile                 # Multi-runtime image running official ComputeSDK gateway
 │   └── package.json               # @computesdk/cloud-run dependency
 │
 ├── scripts/
-│   ├── demo_gke_sandbox_scenario.py # Full Scenario D automated Python runner
-│   ├── demo_gke_sandbox_scenario.sh # Scenario D Bash/cURL runner
-│   ├── demo_python_stateful.py    # Local sidecar 3-turn stateful Python demo
-│   └── demo_stateful.sh           # Local sidecar multi-turn session bash demo
+│   ├── 01_build_all_images.sh     # [Setup 1] Cloud Build all 3 containers with uv
+│   ├── 02_deploy_gke_sandbox.sh   # [Setup 2] Deploy GKE warmpool CRDs & router
+│   ├── 03_deploy_cloud_run.sh     # [Setup 3] Deploy multi-container Cloud Run service
+│   ├── 04_demo_scenario1_cloudrun_sandbox.py / .sh # [Scenario 1] In-container sandbox demo
+│   ├── 05_demo_scenario2_managed_agent.py / .sh    # [Scenario 2] Managed Agent AI loop demo
+│   └── 06_demo_scenario3_gke_agent_sandbox.py / .sh # [Scenario 3] GKE distributed warmpool demo
 │
 ├── service.yaml                   # Knative multi-container Cloud Run deployment configuration
 ├── .gitignore                     # Git ignore rules for Python & Node.js
@@ -141,6 +141,16 @@ curl -s -X POST "$SERVICE_URL/sandbox/exec" \
   -d '{"language": "python", "code": "import sys; print(f\"Executed on Cloud Run local sidecar Python {sys.version.split()[0]}\")"}'
 ```
 
+#### Run the Automated Scenario 1 Demonstration:
+
+```bash
+# Python runner:
+python3 scripts/04_demo_scenario1_cloudrun_sandbox.py
+
+# Or Bash / cURL runner:
+./scripts/04_demo_scenario1_cloudrun_sandbox.sh
+```
+
 ---
 
 ### Scenario 2: Managed Agent AI Reasoning Loop (`POST /agent/task`)
@@ -155,6 +165,16 @@ curl -s -X POST "$SERVICE_URL/agent/task" \
 ```
 
 *Note: You can target the agent loop to the local sidecar via `POST /sandbox/agent/task` or GKE via `POST /gke/agent/task`.*
+
+#### Run the Automated Scenario 2 Demonstration:
+
+```bash
+# Python runner:
+python3 scripts/05_demo_scenario2_managed_agent.py
+
+# Or Bash / cURL runner:
+./scripts/05_demo_scenario2_managed_agent.sh
+```
 
 ---
 
@@ -188,7 +208,7 @@ flowchart TD
     end
 ```
 
-#### Key Highlights of Scenario D:
+#### Key Highlights of Scenario 3:
 1. **Sub-second Checkout:** Claims a pre-warmed gVisor sandbox instance from `SandboxWarmPool/python-runtime-warmpool` in `<200ms`.
 2. **Persistent Multi-Turn State:** Filesystem and process state persist across turns using `session_id` (e.g. saving state in Turn 1, calculating norms in Turn 2).
 3. **Autonomous Gemini Loop:** Gemini model synthesizes code, calls `execute_sandbox_code`, inspects execution results from the GKE sandbox, and self-corrects runtime errors.
@@ -233,14 +253,14 @@ flowchart TD
    kubectl apply -f k8s/03-router-service.yaml
    ```
 
-#### Run the Automated Scenario D Demonstration:
+#### Run the Automated Scenario 3 Demonstration:
 
 ```bash
 # Python runner:
-python3 scripts/demo_gke_sandbox_scenario.py
+python3 scripts/06_demo_scenario3_gke_agent_sandbox.py
 
 # Or Bash / cURL runner:
-./scripts/demo_gke_sandbox_scenario.sh
+./scripts/06_demo_scenario3_gke_agent_sandbox.sh
 ```
 
 ---
@@ -251,11 +271,11 @@ We provide end-to-end automation scripts and CLI commands for builds, Cloud Run,
 
 ### 1. Build All Container Images (with `uv`)
 
-All Python containers use [uv](https://github.com/astral-sh/uv) (`COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/` and `uv pip install --system`) for ultra-fast, sub-second dependency installation:
+All Python containers use [uv](https://github.com/astral-sh/uv) (`COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/` and `uv pip install --system -r pyproject.toml`) for ultra-fast, sub-second dependency installation:
 
 ```bash
 # Automated build runner
-./scripts/build_all_images.sh
+./scripts/01_build_all_images.sh
 ```
 
 *Or via direct `gcloud` commands:*
