@@ -142,7 +142,7 @@ class AgentRunner:
         # 2. Execute via Local In-Container Cloud Run Sidecar
         if not command:
             if language in ("python", "python3", "py"):
-                install_prefix = f"pip install --no-cache-dir {dependency} >&2 && " if dependency else ""
+                install_prefix = f"(uv pip install --no-cache {dependency} 2>/dev/null || pip install --no-cache-dir {dependency}) >&2 && " if dependency else ""
                 b64_code = base64.b64encode((code or "").encode("utf-8")).decode("utf-8")
                 command = f"{install_prefix}echo {b64_code} | base64 -d | python3"
             elif language in ("node", "nodejs", "javascript", "js"):

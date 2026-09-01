@@ -76,7 +76,8 @@ The service uses a **Nested Defense-in-Depth** model:
 ```
 .
 ├── gke-router/
-│   ├── Dockerfile                 # Python 3.11 container for GKE Sandbox Router
+│   ├── Dockerfile                 # Python 3.11 container with uv for fast installs
+│   ├── pyproject.toml             # uv / standard project packaging
 │   ├── main.py                    # FastAPI gateway managing SandboxClaims & execution proxies
 │   └── requirements.txt           # fastapi, uvicorn, httpx, kubernetes, pydantic
 │
@@ -89,7 +90,8 @@ The service uses a **Nested Defense-in-Depth** model:
 │   └── 03-router-service.yaml     # Internal Load Balancer service (10.128.0.78:8080)
 │
 ├── orchestrator/
-│   ├── Dockerfile                 # Python 3.11 container with FastAPI & google-genai
+│   ├── Dockerfile                 # Python 3.11 container with uv for fast installs
+│   ├── pyproject.toml             # uv / standard project packaging
 │   ├── main.py                    # Ingress FastAPI orchestrator with connection pooling
 │   ├── agent_runner.py            # Vertex AI Gemini agent loop & session routing
 │   └── requirements.txt           # fastapi, uvicorn, httpx, pydantic, google-genai
@@ -240,3 +242,89 @@ python3 scripts/demo_gke_sandbox_scenario.py
 # Or Bash / cURL runner:
 ./scripts/demo_gke_sandbox_scenario.sh
 ```
+
+---
+
+## 🚀 Deployment Guide & Automation Scripts
+
+We provide end-to-end automation scripts and CLI commands for builds, Cloud Run, and GKE.
+
+### 1. Build All Container Images (with `uv`)
+
+All Python containers use [uv](https://github.com/astral-sh/uv) (`COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/` and `uv pip install --system`) for ultra-fast, sub-second dependency installation:
+
+```bash
+# Automated build runner
+./scripts/build_all_images.sh
+```
+
+*Or via direct `gcloud` commands:*
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+REGION="us-central1"
+REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy"
+
+# 1. Python Orchestrator
+gcloud builds submit orchestrator --tag "${REGISTRY}/python-orchestrator:latest" --region "${REGION}"
+
+# 2. ComputeSDK Sidecar
+gcloud builds submit sidecar --tag "${REGISTRY}/computesdk-sidecar:latest" --region "${REGION}"
+
+# 3. GKE Sandbox Router
+gcloud builds submit gke-router --tag "${REGISTRY}/gke-sandbox-router:latest" --region "${REGION}"
+```
+
+---
+
+### 2. Deploy Cloud Run Service
+
+Deploy the multi-container Cloud Run service with Direct VPC Egress enabled:
+
+```bash
+# Automated deployment script
+./scripts/deploy_cloud_run.sh
+```
+
+*Or via declarative Knative YAML (`service.yaml`):*
+```bash
+gcloud run services replace service.yaml --region us-central1
+```
+
+*Or via direct `gcloud` CLI flags:*
+```bash
+gcloud beta run deploy sandbox-sidecar \
+    --region us-central1 \
+    --container python-orchestrator \
+    --image us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/python-orchestrator:latest \
+    --port 8080 \
+    --container computesdk-sidecar \
+    --image us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/computesdk-sidecar:latest \
+    --network general \
+    --subnet central \
+    --vpc-egress private-ranges-only \
+    --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=kenthua-alto-agents,GOOGLE_CLOUD_LOCATION=us-central1,GKE_ROUTER_URL=http://10.128.0.78:8080" \
+    --execution-environment gen2 \
+    --allow-unauthenticated
+```
+
+---
+
+### 3. Deploy GKE Agent Sandbox & Router
+
+```bash
+# Automated GKE deploy runner
+./scripts/deploy_gke.sh
+```
+
+*Or via direct `kubectl` commands:*
+```bash
+# 1. Agent Sandbox Warmpool
+kubectl apply -f k8s/00-sandbox-template.yaml
+kubectl apply -f k8s/00-sandbox-warmpool.yaml
+
+# 2. Router Deployment & Internal Load Balancer
+kubectl apply -f k8s/01-rbac.yaml
+kubectl apply -f k8s/02-router-deployment.yaml
+kubectl apply -f k8s/03-router-service.yaml
+```
+
