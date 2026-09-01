@@ -61,16 +61,6 @@ The service uses a **Nested Defense-in-Depth** model:
 
 ---
 
-## ⚡ Performance Benchmark: Gen 1 vs. Gen 2 MicroVM
-
-| Endpoint | Workload Description | Gen 1 Latency | Gen 2 MicroVM Latency | Improvement |
-| :--- | :--- | :--- | :--- | :--- |
-| `GET /status` | Health Check & Discovery | `~0.44s` | **`~0.20s`** | **~54% faster** |
-| `POST /exec` | Dynamic Python Execution | `~1.35s` | **`~0.98s`** | **~27% faster** |
-| `POST /exec` | Dynamic Node.js + `npm install is-odd` | `~7.20s` (install: 6s) | **`~4.21s`** (install: 3s) | **~41% faster** |
-
----
-
 ## 📂 Repository Structure
 
 ```
