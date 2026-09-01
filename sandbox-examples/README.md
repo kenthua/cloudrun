@@ -99,17 +99,33 @@ The service uses a **Nested Defense-in-Depth** model:
 │   └── package.json               # @computesdk/cloud-run dependency
 │
 ├── scripts/
-│   ├── 01_build_all_images.sh     # [Setup 1] Cloud Build all 3 containers with uv
-│   ├── 02_deploy_gke_sandbox.sh   # [Setup 2] Deploy GKE warmpool CRDs & router
-│   ├── 03_deploy_cloud_run.sh     # [Setup 3] Deploy multi-container Cloud Run service
-│   ├── 04_demo_scenario1_cloudrun_sandbox.py / .sh # [Scenario 1] In-container sandbox demo
-│   ├── 05_demo_scenario2_managed_agent.py / .sh    # [Scenario 2] Managed Agent AI loop demo
-│   └── 06_demo_scenario3_gke_agent_sandbox.py / .sh # [Scenario 3] GKE distributed warmpool demo
+│   ├── 01_build_all_images.sh                  # [Setup 1] Cloud Build all 3 containers with uv
+│   ├── 02_deploy_gke_sandbox.sh                # [Setup 2] Deploy GKE warmpool CRDs & router
+│   ├── 03_deploy_cloud_run.sh                  # [Setup 3] Deploy multi-container Cloud Run service
+│   ├── 04_demo_scenario1_cloudrun_sandbox.py   # [Scenario 1] Python programmatic test runner
+│   ├── 04_demo_scenario1_cloudrun_sandbox.sh   # [Scenario 1] Bash / cURL raw HTTP runner
+│   ├── 05_demo_scenario2_managed_agent.py      # [Scenario 2] Python programmatic test runner
+│   ├── 05_demo_scenario2_managed_agent.sh      # [Scenario 2] Bash / cURL raw HTTP runner
+│   ├── 06_demo_scenario3_gke_agent_sandbox.py  # [Scenario 3] Python multi-turn stateful test suite
+│   ├── 06_demo_scenario3_gke_agent_sandbox.sh  # [Scenario 3] Bash / cURL raw HTTP runner
+│   └── 07_run_all_scenarios.sh                 # [Test Suite] Runs all scenarios & records to TEST_RESULTS.md
 │
+├── TEST_RESULTS.md                 # Full recorded execution log of all live test runs
 ├── service.yaml                   # Knative multi-container Cloud Run deployment configuration
 ├── .gitignore                     # Git ignore rules for Python & Node.js
 └── README.md                      # Documentation & architecture guide
 ```
+
+---
+
+### 💡 Understanding the Demo Scripts: Python (`.py`) vs. Bash/cURL (`.sh`)
+
+For each scenario, we provide both a **Python runner** and a **Bash runner**. They serve two distinct purposes:
+
+| Type | Format | Target Audience / Purpose | What it Does |
+| :--- | :--- | :--- | :--- |
+| **Python Test Runner** | `.py` | **Automated Testing & CI/CD** | Programmatic test suite using `httpx`. Executes multi-turn steps sequentially, verifies state persistence across turns (e.g. Turn 1 $\rightarrow$ Turn 2 $\rightarrow$ Turn 3), checks intermediate `/tmp` files, inspects Pod IPs, and automatically releases claims. |
+| **Bash / cURL Runner** | `.sh` | **Quick CLI Inspection & API Examples** | Lightweight shell scripts demonstrating raw HTTP `POST` and `DELETE` calls with `curl` and `jq`. Ideal for copy-pasting into your terminal, Postman, or integrating into non-Python applications. |
 
 ---
 
@@ -302,7 +318,7 @@ Deploy the multi-container Cloud Run service with Direct VPC Egress enabled:
 
 ```bash
 # Automated deployment script
-./scripts/deploy_cloud_run.sh
+./scripts/03_deploy_cloud_run.sh
 ```
 
 *Or via declarative Knative YAML (`service.yaml`):*
@@ -333,7 +349,7 @@ gcloud beta run deploy sandbox-sidecar \
 
 ```bash
 # Automated GKE deploy runner
-./scripts/deploy_gke.sh
+./scripts/02_deploy_gke_sandbox.sh
 ```
 
 *Or via direct `kubectl` commands:*
