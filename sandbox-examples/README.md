@@ -6,9 +6,9 @@
 [![ComputeSDK](https://img.shields.io/badge/ComputeSDK-cloud--run-orange)](https://github.com/computesdk/computesdk/tree/main/packages/cloud-run)
 
 This repository demonstrates how to build and deploy an **autonomous AI coding agent and sandboxed code execution service** on Google Cloud Run. It combines:
-1. **Google Gen AI Interactions API (`client.interactions.create`)** for autonomous reasoning and tool calling.
+1. **Google Gen AI Interactions API (`client.interactions.create`)** for autonomous multi-turn reasoning and tool calling.
 2. **ComputeSDK Cloud Run Gateway** in a sidecar container to manage secure, in-container gVisor micro-sandboxes.
-3. **Python FastAPI Orchestrator** with persistent connection pooling and robust execution handling.
+3. **Python FastAPI Orchestrator** with persistent connection pooling and stateful session chaining.
 
 ---
 
@@ -21,6 +21,7 @@ We expanded the architecture by:
 * Integrating **[ComputeSDK](https://github.com/computesdk/computesdk/tree/main/packages/cloud-run)** as an official decoupled sidecar (`gateway.mjs`).
 * Enabling **Cloud Run Gen 2 (KVM MicroVM)** execution environment with startup CPU boost.
 * Implementing the **Google Gen AI Managed Agents / Interactions API** so Gemini models can synthesize, run, verify, and self-correct untrusted code directly inside secure gVisor sandboxes.
+* Supporting **Stateful Multi-Turn Sessions (`previous_interaction_id`)** where the agent remembers context and iterates across multi-step data pipelines.
 
 ---
 
@@ -58,30 +59,6 @@ The service uses a **Nested Defense-in-Depth** model:
  └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-```mermaid
-flowchart TD
-    Client([Client / Developer]) -->|POST /agent/task<br/>POST /exec| Ingress[Python Orchestrator<br/>FastAPI :8080]
-    
-    subgraph AgentLoop["Managed Agents Interactions Flow"]
-        Ingress -->|1. client.interactions.create| Gemini[Google GenAI / Gemini 2.5]
-        Gemini -->|2. function_call: execute_sandbox_code| Ingress
-    end
-    
-    subgraph CloudRunInstance["Cloud Run Service (Gen 2 MicroVM)"]
-        Ingress -->|3. HTTP POST /v1/sandbox/do<br/>localhost:8081| Sidecar[ComputeSDK Gateway<br/>Node.js :8081]
-        
-        subgraph SandboxBoundary["gVisor User-Space Sandbox Boundary"]
-            Sidecar -->|/usr/local/gcp/bin/sandbox do| Guest[Sandboxed Execution<br/>Python 3 / Node.js / CLI]
-        end
-    end
-    
-    Guest -->|stdout / stderr / exitCode| Sidecar
-    Sidecar -->|Tool Result| Ingress
-    Ingress -->|4. function_result + previous_interaction_id| Gemini
-    Gemini -->|5. Verified Final Answer| Ingress
-    Ingress -->|JSON Response| Client
-```
-
 ---
 
 ## ⚡ Performance Benchmark: Gen 1 vs. Gen 2 MicroVM
@@ -92,25 +69,48 @@ flowchart TD
 | `POST /exec` | Dynamic Python Execution | `~1.35s` | **`~0.98s`** | **~27% faster** |
 | `POST /exec` | Dynamic Node.js + `npm install is-odd` | `~7.20s` (install: 6s) | **`~4.21s`** (install: 3s) | **~41% faster** |
 
-> [!NOTE]
-> **Performance Disclaimer:** Measurements vary depending on allocated CPU/memory, cold starts, container layers, and network latency to registries. Figures above are for illustrative test purposes.
-
 ---
 
 ## 📂 Repository Structure
 
 ```
 .
+├── gke-router/
+│   ├── Dockerfile                 # Python 3.11 container with uv for fast installs
+│   ├── pyproject.toml             # uv / standard project packaging (no requirements.txt needed)
+│   └── main.py                    # FastAPI gateway managing SandboxClaims & execution proxies
+│
+├── k8s/
+│   ├── 00-sandbox-template.yaml   # Official GKE SandboxTemplate blueprint (gVisor runtime)
+│   ├── 00-sandbox-warmpool.yaml   # Official GKE SandboxWarmPool spec (pre-warmed pods)
+│   ├── 00-sandbox-claim.yaml      # Sample SandboxClaim resource definition
+│   ├── 01-rbac.yaml               # ServiceAccount, ClusterRole, and Bindings for Sandbox router
+│   ├── 02-router-deployment.yaml  # 2-replica deployment for gke-sandbox-router
+│   └── 03-router-service.yaml     # Internal Load Balancer service (10.128.0.78:8080)
+│
 ├── orchestrator/
-│   ├── Dockerfile                 # Python 3.11 container with FastAPI & google-genai
+│   ├── Dockerfile                 # Python 3.11 container with uv for fast installs
+│   ├── pyproject.toml             # uv / standard project packaging (no requirements.txt needed)
 │   ├── main.py                    # Ingress FastAPI orchestrator with connection pooling
-│   ├── agent_runner.py            # Interactions API agent loop & sandboxed tool executor
-│   └── requirements.txt           # fastapi, uvicorn, httpx, pydantic, google-genai
+│   └── agent_runner.py            # Vertex AI Gemini agent loop & session routing
 │
 ├── sidecar/
 │   ├── Dockerfile                 # Multi-runtime image running official ComputeSDK gateway
 │   └── package.json               # @computesdk/cloud-run dependency
 │
+├── scripts/
+│   ├── 01_build_all_images.sh                  # [Setup 1] Cloud Build all 3 containers with uv
+│   ├── 02_deploy_gke_sandbox.sh                # [Setup 2] Deploy GKE warmpool CRDs & router
+│   ├── 03_deploy_cloud_run.sh                  # [Setup 3] Deploy multi-container Cloud Run service
+│   ├── 04_demo_scenario1_cloudrun_sandbox.py   # [Scenario 1] Python programmatic test runner
+│   ├── 04_demo_scenario1_cloudrun_sandbox.sh   # [Scenario 1] Bash / cURL raw HTTP runner
+│   ├── 05_demo_scenario2_managed_agent.py      # [Scenario 2] Python programmatic test runner
+│   ├── 05_demo_scenario2_managed_agent.sh      # [Scenario 2] Bash / cURL raw HTTP runner
+│   ├── 06_demo_scenario3_gke_agent_sandbox.py  # [Scenario 3] Python multi-turn stateful test suite
+│   ├── 06_demo_scenario3_gke_agent_sandbox.sh  # [Scenario 3] Bash / cURL raw HTTP runner
+│   └── 07_run_all_scenarios.sh                 # [Test Suite] Runs all scenarios & records to TEST_RESULTS.md
+│
+├── TEST_RESULTS.md                 # Full recorded execution log of all live test runs
 ├── service.yaml                   # Knative multi-container Cloud Run deployment configuration
 ├── .gitignore                     # Git ignore rules for Python & Node.js
 └── README.md                      # Documentation & architecture guide
@@ -118,112 +118,249 @@ flowchart TD
 
 ---
 
-## 🚀 Quickstart & Deployment Guide
+### 💡 Understanding the Demo Scripts: Python (`.py`) vs. Bash/cURL (`.sh`)
 
-### 1. Prerequisites
+For each scenario, we provide both a **Python runner** and a **Bash runner**. They serve two distinct purposes:
 
-* Google Cloud SDK (`gcloud`) installed and authenticated.
-* APIs enabled:
-  ```bash
-  gcloud services enable run.googleapis.com cloudbuild.googleapis.com aiplatform.googleapis.com
-  ```
+| Type | Format | Target Audience / Purpose | What it Does |
+| :--- | :--- | :--- | :--- |
+| **Python Test Runner** | `.py` | **Automated Testing & CI/CD** | Programmatic test suite using `httpx`. Executes multi-turn steps sequentially, verifies state persistence across turns (e.g. Turn 1 $\rightarrow$ Turn 2 $\rightarrow$ Turn 3), checks intermediate `/tmp` files, inspects Pod IPs, and automatically releases claims. |
+| **Bash / cURL Runner** | `.sh` | **Quick CLI Inspection & API Examples** | Lightweight shell scripts demonstrating raw HTTP `POST` and `DELETE` calls with `curl` and `jq`. Ideal for copy-pasting into your terminal, Postman, or integrating into non-Python applications. |
 
-### 2. Build Container Images
+---
 
-```bash
-PROJECT_ID=$(gcloud config get-value project)
+## 🧪 Distinct Scenarios & Invocations
 
-# 1. Build Python Orchestrator image
-gcloud builds submit --tag us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/python-orchestrator:latest ./orchestrator
+Every scenario is **distinct, decoupled, and explicitly invokable** at runtime via dedicated endpoints or the `backend` field:
 
-# 2. Build ComputeSDK Sidecar image
-gcloud builds submit --tag us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/computesdk-sidecar:latest ./sidecar
 ```
-
-### 3. Deploy Multi-Container Service
-
-Apply [`service.yaml`](file:///home/kenthua/cr-sandbox/service.yaml) to Cloud Run:
-
-```bash
-gcloud beta run services replace service.yaml --region us-central1
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 Cloud Run AI Gateway                                   │
+├──────────────────────────┬─────────────────────────────┬───────────────────────────────┤
+│ 1. Cloud Run Sandbox     │ 2. Managed Agent AI Loop    │ 3. GKE Agent Sandbox          │
+│    (In-Container gVisor) │    (Vertex AI Gemini Loop)  │    (Distributed Warmpools)    │
+│    POST /sandbox/exec    │    POST /agent/task         │    POST /gke/exec             │
+│                          │    POST /sandbox/agent/task │    POST /gke/agent/task       │
+└──────────────────────────┴─────────────────────────────┴───────────────────────────────┘
 ```
 
 ---
 
-## 🧪 API Reference & Testing
+### Scenario 1: Cloud Run In-Container Sandbox (`POST /sandbox/exec`)
 
-Set your environment variables:
+Directly executes code inside Cloud Run's local gVisor micro-sandbox via ComputeSDK:
+
 ```bash
-SERVICE_URL=$(gcloud run services describe sandbox-sidecar --region us-central1 --format 'value(status.url)')
-TOKEN=$(gcloud auth print-identity-token)
+curl -s -X POST "$SERVICE_URL/sandbox/exec" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"language": "python", "code": "import sys; print(f\"Executed on Cloud Run local sidecar Python {sys.version.split()[0]}\")"}'
 ```
 
-### 1. Autonomous Agent Coding Task (`POST /agent/task`)
+#### Run the Automated Scenario 1 Demonstration:
 
-Spins off a coding agent using the **Google Gen AI Interactions API**. The agent formulates code, executes it in the gVisor sandbox, verifies the output, and returns the verified result.
+```bash
+# Python runner:
+python3 scripts/04_demo_scenario1_cloudrun_sandbox.py
 
-**Request:**
+# Or Bash / cURL runner:
+./scripts/04_demo_scenario1_cloudrun_sandbox.sh
+```
+
+---
+
+### Scenario 2: Managed Agent AI Reasoning Loop (`POST /agent/task`)
+
+Autonomous problem-solving loop where Vertex AI Gemini formulates a solution, runs code in the sandbox, inspects output, and self-corrects:
+
 ```bash
 curl -s -X POST "$SERVICE_URL/agent/task" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Write a Python script that calculates the first 5 prime numbers, execute it in the sandbox to verify, and return the result.",
-    "api_key": "'"$GEMINI_API_KEY"'"
-  }'
+  -d '{"prompt": "Calculate 15 squared plus the square root of 144 using Python and print the result"}'
 ```
 
-**Response:**
-```json
-{
-  "status": "success",
-  "model": "gemini-2.5-flash",
-  "interaction_id": "v1_Chd5UDJSYXJyY05MalZfdU1QeDZXNDJRNBIXeXYyUmFxV3BOUDd2X3VNUGpxcW1vQUU",
-  "steps": [
-    {
-      "type": "sandbox_execution",
-      "turn": 1,
-      "arguments": {
-        "language": "python",
-        "code": "def is_prime(num):\n    if num < 2:\n        return False\n    for i in range(2, int(num**0.5) + 1):\n        if num % i == 0:\n            return False\n    return True\n\nprimes = []\nnum = 2\nwhile len(primes) < 5:\n    if is_prime(num):\n        primes.append(num)\n    num += 1\n\nprint(primes)"
-      },
-      "result": {
-        "stdout": "[2, 3, 5, 7, 11]\n",
-        "stderr": "",
-        "exit_code": 0
-      }
-    }
-  ],
-  "output": "The first 5 prime numbers are: `[2, 3, 5, 7, 11]`."
-}
+*Note: You can target the agent loop to the local sidecar via `POST /sandbox/agent/task` or GKE via `POST /gke/agent/task`.*
+
+#### Run the Automated Scenario 2 Demonstration:
+
+```bash
+# Python runner:
+python3 scripts/05_demo_scenario2_managed_agent.py
+
+# Or Bash / cURL runner:
+./scripts/05_demo_scenario2_managed_agent.sh
 ```
 
 ---
 
-### 2. Dynamic Code Execution (`POST /exec`)
+### Scenario 3: GKE Agent Sandbox Distributed Warmpool (`POST /gke/exec`)
 
-Directly executes code or commands inside the sandbox without agent reasoning.
+Routes requests across Google Cloud VPC to **GKE Agent Sandbox** warmpools (`extensions.agents.x-k8s.io/v1alpha1`) with sub-second pod checkout:
 
-**Python Execution:**
 ```bash
-curl -s -X POST "$SERVICE_URL/exec" \
+curl -s -X POST "$SERVICE_URL/gke/exec" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"language": "python", "code": "import math; print([math.factorial(i) for i in range(6)])"}'
+  -d '{"language": "python", "code": "import socket; print(f\"Executed on GKE Sandbox Pod: {socket.gethostname()}\")"}'
 ```
 
-**Node.js Execution with Dynamic Package Installation:**
+```mermaid
+flowchart TD
+    subgraph CloudRun["Cloud Run Service (sandbox-sidecar)"]
+        User["Client Request\n(/exec or /agent/task)"] --> Orchestrator["python-orchestrator\n(FastAPI Engine)"]
+        Orchestrator --> Gemini["Vertex AI / Gemini 2.5 Flash\n(Tool Calling & Self-Correction)"]
+    end
+
+    subgraph VPC["Google Cloud VPC (general / central: 10.128.0.0/20)"]
+        Orchestrator -- "Direct VPC Egress\n(http://10.128.0.78:8080)" --> ILB["Internal Load Balancer\n(gke-sandbox-router-svc)"]
+    end
+
+    subgraph GKECluster["GKE Cluster (cluster-std)"]
+        ILB --> Router["gke-sandbox-router\n(Gateway & Session Cache)"]
+        Router -- "1. Auto-claim warm pod\n(SandboxClaim API)" --> Controller["GKE Agent Sandbox Controller"]
+        Controller -- "Checks out in <200ms" --> Warmpool["SandboxWarmPool\n(python-runtime-warmpool)"]
+        Router -- "2. Direct HTTP proxy\n(POST http://<pod-ip>:8888/execute)" --> SandboxPod["gVisor Sandbox Pod\n(python-runtime-sandbox:v0.1.0)"]
+    end
+```
+
+#### Key Highlights of Scenario 3:
+1. **Sub-second Checkout:** Claims a pre-warmed gVisor sandbox instance from `SandboxWarmPool/python-runtime-warmpool` in `<200ms`.
+2. **Persistent Multi-Turn State:** Filesystem and process state persist across turns using `session_id` (e.g. saving state in Turn 1, calculating norms in Turn 2).
+3. **Autonomous Gemini Loop:** Gemini model synthesizes code, calls `execute_sandbox_code`, inspects execution results from the GKE sandbox, and self-corrects runtime errors.
+4. **Lifecycle & Cleanup:** `SandboxClaim` resources can be released on demand or automatically cleaned up.
+
+#### Preparing the GKE Agent Sandbox Environment:
+
+1. **Create a gVisor-Enabled Node Pool (Required for GKE Standard)**:
+   ```bash
+   gcloud container node-pools create gvisor-agents-e2 \
+       --cluster ${CLUSTER_NAME} \
+       --region ${REGION} \
+       --machine-type e2-standard-4 \
+       --image-type cos_containerd \
+       --sandbox type=gvisor \
+       --enable-autoscaling \
+       --min-nodes 1 \
+       --max-nodes 5
+   ```
+   > *Note: For GKE Autopilot clusters, node pools and gVisor sandboxing are provisioned automatically on demand when workloads request `runtimeClassName: gvisor`.*
+
+2. **Enable Agent Sandbox on the GKE Cluster**:
+   ```bash
+   gcloud beta container clusters update ${CLUSTER_NAME} \
+       --region ${REGION} \
+       --enable-agent-sandbox
+   ```
+
+3. **Deploy Blueprint & Warm Pool**:
+   ```bash
+   # Deploy SandboxTemplate (gVisor blueprint)
+   kubectl apply -f k8s/00-sandbox-template.yaml
+
+   # Deploy SandboxWarmPool (pre-warmed ready replicas)
+   kubectl apply -f k8s/00-sandbox-warmpool.yaml
+   ```
+
+4. **Deploy GKE Sandbox Router (ILB & Session Gateway)**:
+   ```bash
+   kubectl apply -f k8s/01-rbac.yaml
+   kubectl apply -f k8s/02-router-deployment.yaml
+   kubectl apply -f k8s/03-router-service.yaml
+   ```
+
+#### Run the Automated Scenario 3 Demonstration:
+
 ```bash
-curl -s -X POST "$SERVICE_URL/exec" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"language": "nodejs", "dependency": "is-odd", "code": "const isOdd = require(\"is-odd\"); console.log(\"Is 17 odd?\", isOdd(17));"}'
+# Python runner:
+python3 scripts/06_demo_scenario3_gke_agent_sandbox.py
+
+# Or Bash / cURL runner:
+./scripts/06_demo_scenario3_gke_agent_sandbox.sh
 ```
 
 ---
 
-### 3. Health & Gateway Status (`GET /status`)
+## 🚀 Deployment Guide & Automation Scripts
+
+We provide end-to-end automation scripts and CLI commands for builds, Cloud Run, and GKE.
+
+### 1. Build All Container Images (with `uv`)
+
+All Python containers use [uv](https://github.com/astral-sh/uv) (`COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/` and `uv pip install --system -r pyproject.toml`) for ultra-fast, sub-second dependency installation:
 
 ```bash
-curl -s -X GET "$SERVICE_URL/status" -H "Authorization: Bearer $TOKEN"
+# Automated build runner
+./scripts/01_build_all_images.sh
 ```
+
+*Or via direct `gcloud` commands:*
+```bash
+PROJECT_ID=$(gcloud config get-value project)
+REGION="us-central1"
+REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/cloud-run-source-deploy"
+
+# 1. Python Orchestrator
+gcloud builds submit orchestrator --tag "${REGISTRY}/python-orchestrator:latest" --region "${REGION}"
+
+# 2. ComputeSDK Sidecar
+gcloud builds submit sidecar --tag "${REGISTRY}/computesdk-sidecar:latest" --region "${REGION}"
+
+# 3. GKE Sandbox Router
+gcloud builds submit gke-router --tag "${REGISTRY}/gke-sandbox-router:latest" --region "${REGION}"
+```
+
+---
+
+### 2. Deploy Cloud Run Service
+
+Deploy the multi-container Cloud Run service with Direct VPC Egress enabled:
+
+```bash
+# Automated deployment script
+./scripts/03_deploy_cloud_run.sh
+```
+
+*Or via declarative Knative YAML (`service.yaml`):*
+```bash
+gcloud run services replace service.yaml --region us-central1
+```
+
+*Or via direct `gcloud` CLI flags:*
+```bash
+gcloud beta run deploy sandbox-sidecar \
+    --region us-central1 \
+    --container python-orchestrator \
+    --image us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/python-orchestrator:latest \
+    --port 8080 \
+    --container computesdk-sidecar \
+    --image us-central1-docker.pkg.dev/kenthua-alto-agents/cloud-run-source-deploy/computesdk-sidecar:latest \
+    --network general \
+    --subnet central \
+    --vpc-egress private-ranges-only \
+    --set-env-vars "GOOGLE_GENAI_USE_VERTEXAI=true,GOOGLE_CLOUD_PROJECT=kenthua-alto-agents,GOOGLE_CLOUD_LOCATION=us-central1,GKE_ROUTER_URL=http://10.128.0.78:8080" \
+    --execution-environment gen2 \
+    --allow-unauthenticated
+```
+
+---
+
+### 3. Deploy GKE Agent Sandbox & Router
+
+```bash
+# Automated GKE deploy runner
+./scripts/02_deploy_gke_sandbox.sh
+```
+
+*Or via direct `kubectl` commands:*
+```bash
+# 1. Agent Sandbox Warmpool
+kubectl apply -f k8s/00-sandbox-template.yaml
+kubectl apply -f k8s/00-sandbox-warmpool.yaml
+
+# 2. Router Deployment & Internal Load Balancer
+kubectl apply -f k8s/01-rbac.yaml
+kubectl apply -f k8s/02-router-deployment.yaml
+kubectl apply -f k8s/03-router-service.yaml
+```
+

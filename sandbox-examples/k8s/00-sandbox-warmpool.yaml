@@ -1,0 +1,12 @@
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: python-runtime-warmpool
+  namespace: default
+  labels:
+    app: python-runtime-warmpool
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    # This must match the name of the SandboxTemplate.
+    name: python-runtime-template
