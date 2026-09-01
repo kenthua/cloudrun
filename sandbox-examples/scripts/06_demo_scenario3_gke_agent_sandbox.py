@@ -12,19 +12,24 @@ import json
 import subprocess
 import httpx
 
-def get_service_url():
-    cmd = ["gcloud", "run", "services", "describe", "sandbox-sidecar", "--region", "us-central1", "--format=value(status.url)"]
-    try:
-        return subprocess.check_output(cmd, text=True).strip()
-    except Exception as e:
-        print(f"Error fetching Cloud Run URL: {e}")
-        return "https://sandbox-sidecar-7igp7tlvnq-uc.a.run.app"
-
 def get_auth_token():
     try:
-        return subprocess.check_output(["gcloud", "auth", "print-identity-token"], text=True).strip()
-    except Exception:
-        return None
+        res = subprocess.run(["gcloud", "auth", "print-identity-token"], capture_output=True, text=True, check=True)
+        return res.stdout.strip()
+    except Exception as e:
+        print(f"[Warning] Could not get gcloud auth token: {e}")
+        return ""
+
+def get_service_url():
+    service_name = os.environ.get("SERVICE_NAME", "sandbox-sidecar")
+    region = os.environ.get("REGION", "us-central1")
+    cmd = ["gcloud", "run", "services", "describe", service_name, "--region", region, "--format=value(status.url)"]
+    try:
+        url = subprocess.check_output(cmd, text=True).strip()
+        if url:
+            return url
+    except Exception as e:
+        raise RuntimeError(f"Failed to query Cloud Run URL for '{service_name}' in '{region}': {e}")
 
 def print_banner(title):
     print("=" * 80)
@@ -41,7 +46,7 @@ def run_gke_sandbox_scenario():
     session_id = f"gke-demo-session-{int(time.time())}"
 
     print_banner("SCENARIO 3: GKE AGENT SANDBOX DISTRIBUTED WARMPODS")
-    print(f"Target Gateway: {service_url}")
+    print(f"Target Service: sandbox-sidecar (us-central1)")
     print(f"Session ID:     {session_id}")
 
     # Step 1: Health & Router Status
