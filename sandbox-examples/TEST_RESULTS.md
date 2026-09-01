@@ -1,6 +1,6 @@
 # 🧪 Cloud Run & GKE Agent Sandbox: Comprehensive Test Results
 
-**Execution Date:** `2026-09-01T19:42:21Z`  
+**Execution Date:** `2026-09-01T20:13:20Z`  
 **GCP Project:** `kenthua-alto-agents`  
 **Cloud Run URL:** `https://sandbox-sidecar-7igp7tlvnq-uc.a.run.app`  
 **GKE Cluster:** `cluster-std` (us-central1)  
@@ -33,22 +33,22 @@ Response: {
   "stdout": "Python Version: 3.11.16\nPrime numbers under 50: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]\n",
   "stderr": "",
   "exit_code": 0,
-  "duration_ms": 714.38,
+  "duration_ms": 781.5,
   "pod_ip": null,
   "claim_name": null,
-  "backend": "sidecar"
+  "backend": "cloudrun-sidecar"
 }
 
 [Step 2/2] Executing Node.js in local sidecar with dynamic dependency...
 Status Code: 200
 Response: {
   "stdout": "Is 42 odd? false\nIs 1337 odd? true\n",
-  "stderr": "\nadded 2 packages in 1s\nnpm notice\nnpm notice New major version of npm available! 10.8.2 -> 12.0.2\nnpm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2\nnpm notice To update run: npm install -g npm@12.0.2\nnpm notice\n",
+  "stderr": "\nadded 2 packages in 8s\nnpm notice\nnpm notice New major version of npm available! 10.8.2 -> 12.0.2\nnpm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2\nnpm notice To update run: npm install -g npm@12.0.2\nnpm notice\n",
   "exit_code": 0,
-  "duration_ms": 2035.05,
+  "duration_ms": 9274.75,
   "pod_ip": null,
   "claim_name": null,
-  "backend": "sidecar"
+  "backend": "cloudrun-sidecar"
 }
 
 ================================================================================
@@ -68,21 +68,21 @@ Service URL: https://sandbox-sidecar-7igp7tlvnq-uc.a.run.app
   "stdout": "Executed on Cloud Run Sidecar Sandbox (Python 3.11.16)\n",
   "stderr": "",
   "exit_code": 0,
-  "duration_ms": 708.08,
+  "duration_ms": 684.32,
   "pod_ip": null,
   "claim_name": null,
-  "backend": "sidecar"
+  "backend": "cloudrun-sidecar"
 }
 
 [Step 2/2] Executing Node.js with dynamic dependency...
 {
   "stdout": "Is 99 odd? true\n",
-  "stderr": "\nadded 2 packages in 5s\nnpm notice\nnpm notice New major version of npm available! 10.8.2 -> 12.0.2\nnpm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2\nnpm notice To update run: npm install -g npm@12.0.2\nnpm notice\n",
+  "stderr": "\nadded 2 packages in 5s\n",
   "exit_code": 0,
-  "duration_ms": 5511.51,
+  "duration_ms": 5452.87,
   "pod_ip": null,
   "claim_name": null,
-  "backend": "sidecar"
+  "backend": "cloudrun-sidecar"
 }
 ```
 
@@ -103,17 +103,15 @@ Turns taken: 1
 Final Model Output:
 15 squared plus the square root of 144 is 237.0.
 
-```python
-result = 15**2 + 144**0.5
-print(result)
-```
-
 [Task 2/2] Sending Prompt on local sidecar backend: "Simulate 10 rolls of a 6-sided die, compute the average, and output whether it is above 3.5."
 Status Code: 200
 Turns taken: 1
 Final Model Output:
-Die rolls: [5, 1, 4, 1, 2, 4, 5, 1, 4, 2]
-Average: 2.9
+I simulated 10 rolls of a 6-sided die.
+
+The rolls were: `[5, 1, 1, 6, 4, 1, 4, 4, 4, 5]`
+The average of these rolls is `3.5`.
+
 The average is not above 3.5.
 
 ================================================================================
@@ -130,28 +128,28 @@ Service URL: https://sandbox-sidecar-7igp7tlvnq-uc.a.run.app
 
 [Step 1/1] Submitting autonomous agent task to Gemini loop...
 {
-  "status": "success",
-  "model": "gemini-2.5-flash",
+  "output": "17 factorial is 355,687,428,096,000.",
   "session_id": "managed-agent-curl-demo",
+  "interaction_id": "int-1788293636901",
   "steps": [
     {
-      "type": "sandbox_execution",
       "turn": 1,
+      "tool": "execute_sandbox_code",
       "arguments": {
         "language": "python",
-        "code": "\nimport math\n\nresult = math.factorial(17)\nprint(result)\n"
+        "code": "\nimport math\nprint(math.factorial(17))\n"
       },
       "result": {
         "stdout": "355687428096000\n",
         "stderr": "",
         "exit_code": 0,
-        "pod_ip": "10.20.4.15",
+        "pod_ip": "10.20.4.24",
         "claim_name": "claim-managed-agent-curl-demo",
         "backend": "gke-agent-sandbox"
       }
     }
   ],
-  "output": "The factorial of 17 is 355,687,428,096,000."
+  "backend": "gke"
 }
 ```
 
@@ -161,71 +159,85 @@ Service URL: https://sandbox-sidecar-7igp7tlvnq-uc.a.run.app
 
 ### Python Execution Runner (`06_demo_scenario3_gke_agent_sandbox.py`):
 ```text
-sandboxclaim.extensions.agents.x-k8s.io "claim-gke-demo-session-1788291785" deleted from default namespace
-
 ================================================================================
 ☸️  SCENARIO 3: GKE AGENT SANDBOX DISTRIBUTED WARMPODS
 ================================================================================
 
 Target Gateway: https://sandbox-sidecar-7igp7tlvnq-uc.a.run.app
-Session ID:     gke-demo-session-1788291785
+Session ID:     gke-demo-session-1788293639
 
 --- [Step 1/5] Checking Orchestrator & Router Status ---
 HTTP Status: 200
 Status Payload: {
-  "status": "healthy",
-  "backend": "gke-sandbox-router",
+  "status": "ok",
+  "sidecar_connected": false,
+  "gke_router_connected": true,
   "details": {
-    "status": "ok",
-    "service": "gke-agent-sandbox-router",
-    "active_sessions": 2,
-    "session_ttl_seconds": 600,
-    "namespace": "default",
-    "warmpool": "python-runtime-warmpool"
+    "gke_router": {
+      "status": "ok",
+      "service": "gke-agent-sandbox-router",
+      "active_sessions": 3,
+      "session_ttl_seconds": 300,
+      "namespace": "default",
+      "warmpool": "python-runtime-warmpool"
+    }
   }
 }
 
---- [Step 2/5] Turn 1: Generating Dataset in GKE Sandbox Pod ---
+--- [Step 2/5] Turn 1: Generating & Saving Dataset in GKE Sandbox Pod (/tmp) ---
 HTTP Status: 200
-Claim Name:  claim-gke-demo-session-1788291785
-Pod IP:      10.20.4.16
-Stdout:      Saved dataset to /tmp/scenario_data.json with matrix determinant: -2.00
+Claim Name:  claim-gke-demo-session-1788293639
+Pod IP:      10.20.4.25
+Stdout:
+Writing payload to GKE sandbox pod filesystem at /tmp/scenario_data.json:
+{
+  "session_id": "gke-stateful-verification",
+  "pod_hostname": "python-runtime-warmpool-m2x6b",
+  "message": "GKE Agent Sandbox Stateful Persistence Verified Across Turns",
+  "matrix": [
+    [
+      1.0,
+      2.0
+    ],
+    [
+      3.0,
+      4.0
+    ]
+  ]
+}
+Saved dataset successfully to GKE pod /tmp/scenario_data.json (Matrix Det: -2.00)
 
---- [Step 3/5] Turn 2: Reading Persisted State in GKE Sandbox Pod ---
+--- [Step 3/5] Turn 2: Reading Persisted State from GKE Sandbox Pod (/tmp) ---
 HTTP Status: 200
-Stdout:      Read from Turn 1: GKE Agent Sandbox Stateful Persistence Verified
-Eigenvalues of persisted matrix: [-0.37228132  5.37228132]
+Stdout:
+Reading /tmp/scenario_data.json on GKE sandbox pod: python-runtime-warmpool-m2x6b
+Loaded Content from GKE Pod /tmp:
+{
+  "session_id": "gke-stateful-verification",
+  "pod_hostname": "python-runtime-warmpool-m2x6b",
+  "message": "GKE Agent Sandbox Stateful Persistence Verified Across Turns",
+  "matrix": [
+    [
+      1.0,
+      2.0
+    ],
+    [
+      3.0,
+      4.0
+    ]
+  ]
+}
+Computed Eigenvalues from persisted matrix: [-0.3722813232690143, 5.372281323269014]
 
 --- [Step 4/5] Turn 3: Autonomous Vertex AI Gemini Loop on GKE ---
 HTTP Status: 200
-Agent Steps: 3
+Agent Steps: 2
 Agent Output:
-The matrix read from `/tmp/scenario_data.json` is:
-```
-[[1. 2.]
- [3. 4.]]
-```
-The Frobenius norm of this matrix is **5.477225575051661**.
+The Frobenius norm of the matrix is 5.477225575051661.
 
-The Frobenius norm of a matrix is a measure of its "size" or "magnitude". It is calculated as the square root of the sum of the absolute squares of its elements. For a matrix A, the Frobenius norm (||A||_F) is given by the formula:
-
-$$||A||_F = \sqrt{\sum_{i=1}^{m} \sum_{j=1}^{n} |a_{ij}|^2}$$
-
-For the given matrix:
-$$A = \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}$$
-
-The calculation is as follows:
-$$||A||_F = \sqrt{1^2 + 2^2 + 3^2 + 4^2}$$
-$$||A||_F = \sqrt{1 + 4 + 9 + 16}$$
-$$||A||_F = \sqrt{30}$$
-$$||A||_F \approx 5.477225575051661$$
-
-This value indicates the overall magnitude of the matrix.
-
-
---- [Step 5/5] Cleanup: Deleting SandboxClaim 'claim-gke-demo-session-1788291785' ---
-SandboxClaim cleaned up successfully.
-
+--- [Step 5/5] Cleanup: Deleting SandboxClaim 'claim-gke-demo-session-1788293639' ---
+Cleanup Status: 200
+✅ Verified: SandboxClaim 'claim-gke-demo-session-1788293639' successfully removed from GKE cluster.
 ================================================================================
 ☸️  ✅ SCENARIO 3 GKE AGENT SANDBOX VALIDATION COMPLETE
 ================================================================================
@@ -241,24 +253,24 @@ Service URL: https://sandbox-sidecar-7igp7tlvnq-uc.a.run.app
 
 [Step 1/2] Executing Python code on GKE Agent Sandbox Pod...
 {
-  "stdout": "Executed on GKE Pod python-runtime-warmpool-64b92 (Python 3.11.14)\n",
+  "stdout": "Executed on GKE Pod python-runtime-warmpool-xw8rz (Python 3.11.14)\n",
   "stderr": "",
   "exit_code": 0,
-  "duration_ms": 758.64,
-  "pod_ip": "10.20.4.17",
+  "duration_ms": 575.92,
+  "pod_ip": "10.20.4.26",
   "claim_name": "claim-gke-curl-demo",
   "backend": "gke-agent-sandbox"
 }
 
 [Step 2/2] Running Managed Agent task on GKE backend...
 {
-  "status": "success",
-  "model": "gemini-2.5-flash",
+  "output": "The sum of squares from 1 to 20 is 2870.",
   "session_id": "gke-curl-demo",
+  "interaction_id": "int-1788293651522",
   "steps": [
     {
-      "type": "sandbox_execution",
       "turn": 1,
+      "tool": "execute_sandbox_code",
       "arguments": {
         "code": "\nsum_of_squares = 0\nfor i in range(1, 21):\n    sum_of_squares += i*i\nprint(sum_of_squares)\n",
         "language": "python"
@@ -267,13 +279,13 @@ Service URL: https://sandbox-sidecar-7igp7tlvnq-uc.a.run.app
         "stdout": "2870\n",
         "stderr": "",
         "exit_code": 0,
-        "pod_ip": "10.20.4.17",
+        "pod_ip": "10.20.4.26",
         "claim_name": "claim-gke-curl-demo",
         "backend": "gke-agent-sandbox"
       }
     }
   ],
-  "output": "The sum of squares from 1 to 20 is 2870.\n\nHere's the Python code that was executed:\n```python\nsum_of_squares = 0\nfor i in range(1, 21):\n    sum_of_squares += i*i\nprint(sum_of_squares)\n```"
+  "backend": "gke"
 }
 
 [Cleanup] Deleting demo SandboxClaim...
