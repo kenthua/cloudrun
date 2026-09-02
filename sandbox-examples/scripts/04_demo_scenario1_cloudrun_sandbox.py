@@ -58,7 +58,7 @@ print(f"Prime numbers under 50: {primes_up_to(50)}")
 """
     payload_py = {"language": "python", "code": code_py}
     
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=60.0) as client:
         resp = client.post(f"{service_url}/sandbox/exec", json=payload_py, headers=headers)
         print(f"Status Code: {resp.status_code}")
         print(f"Response: {json.dumps(resp.json(), indent=2)}")
@@ -75,7 +75,7 @@ console.log(`Is 1337 odd? ${isOdd(1337)}`);
         "code": code_js,
         "dependency": "is-odd"
     }
-    with httpx.Client(timeout=45.0) as client:
+    with httpx.Client(timeout=60.0) as client:
         resp = client.post(f"{service_url}/sandbox/exec", json=payload_js, headers=headers)
         print(f"Status Code: {resp.status_code}")
         print(f"Response: {json.dumps(resp.json(), indent=2)}")

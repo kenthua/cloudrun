@@ -4,7 +4,9 @@
 # ==============================================================================
 set -euo pipefail
 
-OUTPUT_FILE="/home/kenthua/cr-sandbox/TEST_RESULTS.md"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+OUTPUT_FILE="${PROJECT_ROOT}/TEST_RESULTS.md"
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 echo "Running all sandbox test scenarios..."
@@ -25,7 +27,7 @@ cat << HEADER > "${OUTPUT_FILE}"
 | # | Scenario | Endpoint | Description | Status |
 |---|---|---|---|---|
 | **1** | **Cloud Run In-Container Sandbox** | \`POST /sandbox/exec\` | Direct execution in co-located gVisor sidecar container | ✅ PASSED |
-| **2** | **Managed Agent AI Reasoning Loop** | \`POST /agent/task\` | Multi-turn Vertex AI Gemini loop with dynamic tool calling & self-correction | ✅ PASSED |
+| **2** | **Managed Agent AI Reasoning Loop** | \`POST /sandbox/agent/task\` | Multi-turn Vertex AI Gemini loop with dynamic tool calling & self-correction | ✅ PASSED |
 | **3** | **GKE Agent Sandbox Warmpool** | \`POST /gke/exec\` & \`POST /gke/agent/task\` | Multi-turn stateful execution across GKE warm pods with automated claim lifecycle | ✅ PASSED |
 
 ---
@@ -41,13 +43,13 @@ echo "## 1. Scenario 1: Cloud Run In-Container Sidecar Sandbox" >> "${OUTPUT_FIL
 echo "" >> "${OUTPUT_FILE}"
 echo "### Python Execution Runner (\`04_demo_scenario1_cloudrun_sandbox.py\`):" >> "${OUTPUT_FILE}"
 echo '```text' >> "${OUTPUT_FILE}"
-python3 /home/kenthua/cr-sandbox/scripts/04_demo_scenario1_cloudrun_sandbox.py 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
+python3 "${SCRIPT_DIR}/04_demo_scenario1_cloudrun_sandbox.py" 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
 echo '```' >> "${OUTPUT_FILE}"
 echo "" >> "${OUTPUT_FILE}"
 
 echo "### Bash / cURL Execution Runner (\`04_demo_scenario1_cloudrun_sandbox.sh\`):" >> "${OUTPUT_FILE}"
 echo '```text' >> "${OUTPUT_FILE}"
-/home/kenthua/cr-sandbox/scripts/04_demo_scenario1_cloudrun_sandbox.sh 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
+"${SCRIPT_DIR}/04_demo_scenario1_cloudrun_sandbox.sh" 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
 echo '```' >> "${OUTPUT_FILE}"
 echo "" >> "${OUTPUT_FILE}"
 echo "---" >> "${OUTPUT_FILE}"
@@ -57,13 +59,13 @@ echo "## 2. Scenario 2: Managed Agent AI Reasoning Loop" >> "${OUTPUT_FILE}"
 echo "" >> "${OUTPUT_FILE}"
 echo "### Python Execution Runner (\`05_demo_scenario2_managed_agent.py\`):" >> "${OUTPUT_FILE}"
 echo '```text' >> "${OUTPUT_FILE}"
-python3 /home/kenthua/cr-sandbox/scripts/05_demo_scenario2_managed_agent.py 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
+python3 "${SCRIPT_DIR}/05_demo_scenario2_managed_agent.py" 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
 echo '```' >> "${OUTPUT_FILE}"
 echo "" >> "${OUTPUT_FILE}"
 
 echo "### Bash / cURL Execution Runner (\`05_demo_scenario2_managed_agent.sh\`):" >> "${OUTPUT_FILE}"
 echo '```text' >> "${OUTPUT_FILE}"
-/home/kenthua/cr-sandbox/scripts/05_demo_scenario2_managed_agent.sh 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
+"${SCRIPT_DIR}/05_demo_scenario2_managed_agent.sh" 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
 echo '```' >> "${OUTPUT_FILE}"
 echo "" >> "${OUTPUT_FILE}"
 echo "---" >> "${OUTPUT_FILE}"
@@ -73,13 +75,13 @@ echo "## 3. Scenario 3: GKE Agent Sandbox Distributed Warmpool" >> "${OUTPUT_FIL
 echo "" >> "${OUTPUT_FILE}"
 echo "### Python Multi-Turn Stateful Test Suite (\`06_demo_scenario3_gke_agent_sandbox.py\`):" >> "${OUTPUT_FILE}"
 echo '```text' >> "${OUTPUT_FILE}"
-python3 /home/kenthua/cr-sandbox/scripts/06_demo_scenario3_gke_agent_sandbox.py 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
+python3 "${SCRIPT_DIR}/06_demo_scenario3_gke_agent_sandbox.py" 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
 echo '```' >> "${OUTPUT_FILE}"
 echo "" >> "${OUTPUT_FILE}"
 
 echo "### Bash / cURL Execution Runner (\`06_demo_scenario3_gke_agent_sandbox.sh\`):" >> "${OUTPUT_FILE}"
 echo '```text' >> "${OUTPUT_FILE}"
-/home/kenthua/cr-sandbox/scripts/06_demo_scenario3_gke_agent_sandbox.sh 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
+"${SCRIPT_DIR}/06_demo_scenario3_gke_agent_sandbox.sh" 2>&1 | redact_filter | tee -a "${OUTPUT_FILE}"
 echo '```' >> "${OUTPUT_FILE}"
 echo "" >> "${OUTPUT_FILE}"
 
