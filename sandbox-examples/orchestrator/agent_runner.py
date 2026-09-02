@@ -43,12 +43,12 @@ class AgentRunner:
         self.sidecar_base_url = sidecar_base_url
         self.sandbox_secret = sandbox_secret
         self.gke_router_url = gke_router_url
-        self.default_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        self.default_model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
         
         # Configure Vertex AI / Gemini SDK Client
         use_vertex = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("1", "true", "yes")
         project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("PROJECT_ID")
-        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
         
         if use_vertex and project:
             logger.info("Initializing GenAI Client with Vertex AI backend (Project: %s, Location: %s)", project, location)
