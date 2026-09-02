@@ -73,7 +73,7 @@ class ExecResponse(BaseModel):
 
 class AgentTaskRequest(BaseModel):
     prompt: str = Field(..., description="Coding or analysis task for the agent to execute in the sandbox")
-    model: Optional[str] = Field(None, description="Gemini model identifier (defaults to gemini-2.5-flash)")
+    model: Optional[str] = Field(None, description="Gemini model identifier (defaults to gemini-3.8-flash)")
     api_key: Optional[str] = Field(None, description="Optional GEMINI_API_KEY override for the task")
     previous_interaction_id: Optional[str] = Field(None, description="Optional previous interaction ID to continue a stateful session")
     session_id: Optional[str] = Field(None, description="Optional persistent session identifier across turns")

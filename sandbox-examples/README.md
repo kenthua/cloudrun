@@ -49,7 +49,7 @@ The service uses a **Nested Defense-in-Depth** model:
  │  │       Interactions API Call                    Spawns via   │                    │  │
  │  │                  ▼                     /usr/local/gcp/bin/sandbox                │  │
  │  │        ╔══════════════════════╗             (gVisor Runtime)▼                    │  │
- │  │        ║ Gemini 2.5 / Flash   ║                     ╔═════════════════════════╗  │  │
+ │  │        ║ Gemini 3.8 / Flash   ║                     ╔═════════════════════════╗  │  │
  │  │        ║ (Tool: execute_code) ║                     ║ gVisor Inner Sandbox    ║  │  │
  │  │        ╚══════════════════════╝                     ║ - Syscalls intercepted  ║  │  │
  │  │                                                     ║ - Ephemeral filesystem  ║  │  │
@@ -199,7 +199,7 @@ curl -s -X POST "$SERVICE_URL/gke/exec" \
 flowchart TD
     subgraph CloudRun["Cloud Run Service (sandbox-sidecar)"]
         User["Client Request\n(/exec or /agent/task)"] --> Orchestrator["python-orchestrator\n(FastAPI Engine)"]
-        Orchestrator --> Gemini["Vertex AI / Gemini 2.5 Flash\n(Tool Calling & Self-Correction)"]
+        Orchestrator --> Gemini["Vertex AI / Gemini 3.8 Flash\n(Tool Calling & Self-Correction)"]
     end
 
     subgraph VPC["Google Cloud VPC (general / central: 10.128.0.0/20)"]
