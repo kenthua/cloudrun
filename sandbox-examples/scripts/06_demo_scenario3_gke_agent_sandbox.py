@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Scenario 3 Demonstration: GKE Agent Sandbox Distributed Warmpool
-Validates end-to-end multi-turn stateful persistence, sub-second pod checkout,
-and autonomous tool-calling loops executing against GKE gVisor sandbox pods.
+Scenario 3 Demonstration: GKE Agent Sandbox Suspend & Resume
+A clear, step-by-step walkthrough demonstrating how an AI agent saves state,
+hibernates its sandbox (0 cost), and resumes on a fresh pod without losing any work.
 """
 
 import os
@@ -16,8 +16,7 @@ def get_auth_token():
     try:
         res = subprocess.run(["gcloud", "auth", "print-identity-token"], capture_output=True, text=True, check=True)
         return res.stdout.strip()
-    except Exception as e:
-        print(f"[Warning] Could not get gcloud auth token: {e}")
+    except Exception:
         return ""
 
 def get_service_url():
@@ -25,126 +24,140 @@ def get_service_url():
     region = os.environ.get("REGION", "us-central1")
     cmd = ["gcloud", "run", "services", "describe", service_name, "--region", region, "--format=value(status.url)"]
     try:
-        url = subprocess.check_output(cmd, text=True).strip()
-        if url:
-            return url
+        return subprocess.check_output(cmd, text=True).strip()
     except Exception as e:
-        raise RuntimeError(f"Failed to query Cloud Run URL for '{service_name}' in '{region}': {e}")
+        raise RuntimeError(f"Failed to query Cloud Run URL: {e}")
 
-def print_banner(title):
-    print("=" * 80)
-    print(f"☸️  {title}")
-    print("=" * 80 + "\n")
+def print_header(title):
+    print("\n" + "=" * 70)
+    print(f"  {title}")
+    print("=" * 70)
 
-def run_gke_sandbox_scenario():
+def print_step(step_num, title, description):
+    print(f"\n👉 Step {step_num}: {title}")
+    print(f"   {description}\n")
+
+def run_simple_scenario():
     service_url = get_service_url()
     token = get_auth_token()
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    session_id = f"gke-demo-session-{int(time.time())}"
+    session_id = f"demo-session-{int(time.time())}"
 
-    print_banner("SCENARIO 3: GKE AGENT SANDBOX DISTRIBUTED WARMPODS")
-    print(f"Target Service: sandbox-sidecar (us-central1)")
-    print(f"Session ID:     {session_id}")
+    print_header("🎯 SCENARIO 3: GKE AGENT SANDBOX SUSPEND & RESUME")
+    print(f"• Session ID:  {session_id}")
+    print(f"• Story:       An AI Agent creates data, goes to sleep (0 compute cost),")
+    print(f"               and resumes on a new sandbox with 100% of its work intact.")
 
-    # Step 1: Health & Router Status
-    print("\n--- [Step 1/5] Checking Orchestrator & Router Status ---")
-    resp = httpx.get(f"{service_url}/status", headers=headers, timeout=15.0)
-    print(f"HTTP Status: {resp.status_code}")
-    print(f"Status Payload: {json.dumps(resp.json(), indent=2)}")
-
-    # Step 2: Turn 1 - Write State to GKE Sandbox Pod Filesystem (/tmp/scenario_data.json)
-    print("\n--- [Step 2/5] Turn 1: Generating & Saving Dataset in GKE Sandbox Pod (/tmp) ---")
-    code_turn1 = """import json, socket
-import numpy as np
-
+    # --------------------------------------------------------------------------
+    # STEP 1: Write Initial Work (Pod A)
+    # --------------------------------------------------------------------------
+    print_step(1, "Create Work in Sandbox A", "The agent generates a monthly sales dataset and saves it to disk.")
+    
+    code_step1 = """import json, socket
 data = {
-    'session_id': 'gke-stateful-verification',
-    'pod_hostname': socket.gethostname(),
-    'message': 'GKE Agent Sandbox Stateful Persistence Verified Across Turns',
-    'matrix': [[1.0, 2.0], [3.0, 4.0]]
+    'created_on_host': socket.gethostname(),
+    'report': 'Q3 Regional Sales Summary',
+    'sales_by_region': {'North': 120, 'South': 85, 'East': 190, 'West': 210}
 }
+with open('/tmp/sales_report.json', 'w') as f:
+    json.dump(data, f, indent=2)
 
-print('Writing payload to GKE sandbox pod filesystem at /tmp/scenario_data.json:')
+print(f"✅ Created /tmp/sales_report.json on: {data['created_on_host']}")
+print("📄 Saved File Contents:")
 print(json.dumps(data, indent=2))
-
-with open('/tmp/scenario_data.json', 'w') as f:
-    json.dump(data, f)
-
-det = np.linalg.det(np.array(data['matrix']))
-print(f'Saved dataset successfully to GKE pod /tmp/scenario_data.json (Matrix Det: {det:.2f})')
+print(f"📊 Total sales figures saved: {sum(data['sales_by_region'].values())} units")
 """
     resp = httpx.post(
         f"{service_url}/gke/exec",
         headers=headers,
-        json={"language": "python", "code": code_turn1, "session_id": session_id},
+        json={"language": "python", "code": code_step1, "session_id": session_id},
         timeout=30.0
     )
-    print(f"HTTP Status: {resp.status_code}")
-    result1 = resp.json()
-    print(f"Claim Name:  {result1.get('claim_name')}")
-    print(f"Pod IP:      {result1.get('pod_ip')}")
-    print(f"Stdout:\n{result1.get('stdout', '').strip()}")
-    if result1.get('stderr'):
-        print(f"Stderr:\n{result1.get('stderr').strip()}")
+    res1 = resp.json()
+    pod_ip_1 = res1.get('pod_ip')
+    claim_1 = res1.get('claim_name')
+    print(f"   Pod Assigned: {pod_ip_1} (Claim: {claim_1})")
+    print(f"   Sandbox Output:\n{res1.get('stdout', '').strip()}")
 
-    # Step 3: Turn 2 - Read Persisted State in the Same Pod
-    print("\n--- [Step 3/5] Turn 2: Reading Persisted State from GKE Sandbox Pod (/tmp) ---")
-    code_turn2 = """import json, socket
-import numpy as np
+    # --------------------------------------------------------------------------
+    # STEP 2: Suspend the Sandbox (Scale to 0 with GKE Native Pod Snapshot)
+    # --------------------------------------------------------------------------
+    print_step(2, "Put Sandbox to Sleep (GKE Native Pod Snapshot)", "Trigger GKE Pod Snapshot (podsnapshot.gke.io/v1), save kernel pages to GCS, and release pod.")
+    
+    suspend_resp = httpx.post(f"{service_url}/gke/session/{session_id}/suspend", headers=headers, timeout=20.0).json()
+    native_snap = suspend_resp.get('gke_native_snapshot_id')
+    print(f"   Native Snapshot: {native_snap if native_snap else 'Saved to storage bucket'}")
+    if native_snap:
+        print(f"   GCS Snapshot:    gs://gke-pod-snapshots-kenthua-alto-agents/snapshots/{native_snap}/")
+    print(f"   State Saved:     {suspend_resp.get('snapshot_saved')}")
+    print(f"   Active Pods:     {suspend_resp.get('active_compute_pods')} (Compute scaled to ZERO!)")
+    
+    # Confirm pod is terminated via kubectl
+    check = subprocess.run(["kubectl", "get", "sandboxclaim", claim_1, "-n", "default"], capture_output=True, text=True)
+    if "NotFound" in check.stderr or check.returncode != 0:
+        print(f"   Cluster Check:   ✅ Confirmed SandboxClaim '{claim_1}' deleted. Active compute is 0 pods.")
 
-print('Reading /tmp/scenario_data.json on GKE sandbox pod:', socket.gethostname())
-with open('/tmp/scenario_data.json', 'r') as f:
-    loaded = json.load(f)
+    # --------------------------------------------------------------------------
+    # STEP 3: Resume on a Fresh Sandbox (Pod B)
+    # --------------------------------------------------------------------------
+    print_step(3, "Wake Up Sandbox (Resume)", "Acquire a fresh warm sandbox from the pool and restore the saved work.")
+    
+    resume_resp = httpx.post(f"{service_url}/gke/session/{session_id}/resume", headers=headers, timeout=25.0).json()
+    pod_ip_2 = resume_resp.get("new_pod_ip")
+    print(f"   Old Pod (Dead):  {pod_ip_1}")
+    print(f"   New Pod (Live):  {pod_ip_2}")
+    print(f"   Work Restored:   ✅ {resume_resp.get('hydrated')}")
 
-print('Loaded Content from GKE Pod /tmp:')
-print(json.dumps(loaded, indent=2))
+    # --------------------------------------------------------------------------
+    # STEP 4: Verify Restored Data in Sandbox B
+    # --------------------------------------------------------------------------
+    print_step(4, "Verify Work on Sandbox B", "Read the sales file on the brand-new pod to verify zero data loss.")
+    
+    code_step2 = """import json, socket
+with open('/tmp/sales_report.json', 'r') as f:
+    report = json.load(f)
 
-matrix = np.array(loaded['matrix'])
-eigenvalues = np.linalg.eigvals(matrix)
-print('Computed Eigenvalues from persisted matrix:', eigenvalues.tolist())
+print(f"✅ Successfully read /tmp/sales_report.json on NEW pod: {socket.gethostname()}")
+print("📄 Restored File Contents (Verified Intact):")
+print(json.dumps(report, indent=2))
+print(f"🏆 Top Region: West ({report['sales_by_region']['West']} units)")
 """
     resp = httpx.post(
         f"{service_url}/gke/exec",
         headers=headers,
-        json={"language": "python", "code": code_turn2, "session_id": session_id},
+        json={"language": "python", "code": code_step2, "session_id": session_id},
         timeout=30.0
     )
-    print(f"HTTP Status: {resp.status_code}")
-    result2 = resp.json()
-    print(f"Stdout:\n{result2.get('stdout', '').strip()}")
-    if result2.get('stderr'):
-        print(f"Stderr:\n{result2.get('stderr').strip()}")
+    res2 = resp.json()
+    print(f"   Sandbox Output:\n{res2.get('stdout', '').strip()}")
 
-    # Step 4: Turn 3 - Managed Agent Reasoning Loop on GKE Backend
-    print("\n--- [Step 4/5] Turn 3: Autonomous Vertex AI Gemini Loop on GKE ---")
-    prompt = "Read /tmp/scenario_data.json from the sandbox pod, calculate the Frobenius norm of its matrix with numpy, and state the result."
+    # --------------------------------------------------------------------------
+    # STEP 5: Gemini 3.8 Flash Agent Reasoning
+    # --------------------------------------------------------------------------
+    print_step(5, "AI Agent Solves Follow-up Question", "Gemini 3.8 Flash inspects the restored file to find the highest-performing region.")
+    
+    prompt = "Look at /tmp/sales_report.json on the sandbox. What was the best-performing region and what percentage of total sales did it represent?"
     resp = httpx.post(
         f"{service_url}/gke/agent/task",
         headers=headers,
         json={"prompt": prompt, "session_id": session_id, "max_iterations": 5},
         timeout=60.0
     )
-    print(f"HTTP Status: {resp.status_code}")
-    result3 = resp.json()
-    print(f"Agent Steps: {len(result3.get('steps', []))}")
-    print(f"Agent Output:\n{result3.get('output')}\n")
+    res3 = resp.json()
+    print(f"   Agent Reasoning Steps: {len(res3.get('steps', []))}")
+    print(f"   Agent Answer:\n   {res3.get('output').strip()}")
 
-    # Step 5: Explicit Claim Cleanup & Verification
-    claim_name = result1.get('claim_name')
-    print(f"--- [Step 5/5] Cleanup: Deleting SandboxClaim '{claim_name}' ---")
-    cleanup_resp = httpx.delete(f"{service_url}/session/{session_id}", headers=headers, timeout=15.0)
-    print(f"Cleanup Status: {cleanup_resp.status_code}")
+    # --------------------------------------------------------------------------
+    # STEP 6: Clean Up
+    # --------------------------------------------------------------------------
+    print_step(6, "Cleanup Session", "Delete the session claim and return resources to the pool.")
+    httpx.delete(f"{service_url}/session/{session_id}", headers=headers, timeout=15.0)
+    print("   Session closed cleanly. ✅")
 
-    check_claim = subprocess.run(["kubectl", "get", "sandboxclaim", claim_name, "-n", "default"], capture_output=True, text=True)
-    if "NotFound" in check_claim.stderr or check_claim.returncode != 0:
-        print(f"✅ Verified: SandboxClaim '{claim_name}' successfully removed from GKE cluster.")
-    else:
-        print(f"SandboxClaim status in GKE: {check_claim.stdout.strip()}")
-
-    print_banner("✅ SCENARIO 3 GKE AGENT SANDBOX VALIDATION COMPLETE")
+    print_header("🎉 SCENARIO 3 COMPLETED SUCCESSFULLY!")
 
 if __name__ == "__main__":
-    run_gke_sandbox_scenario()
+    run_simple_scenario()

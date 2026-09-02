@@ -1,0 +1,9 @@
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: gke-agent-snapshot-storage
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: "gke-pod-snapshots-kenthua-alto-agents"
+      path: "snapshots"

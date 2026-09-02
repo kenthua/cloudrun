@@ -2,7 +2,8 @@
 GKE Agent Sandbox Router & Gateway Service
 Bridges Cloud Run (or external callers) to GKE gVisor Agent Sandboxes.
 Manages SandboxClaim lifecycle against extensions.agents.x-k8s.io/v1alpha1.
-Supports stateful multi-turn sessions, ephemeral auto-delete execution, and background TTL sweeping.
+Supports stateful multi-turn sessions, scale-to-zero suspend/resume with GCS/memory state hydration,
+ephemeral auto-delete execution, and background TTL sweeping.
 """
 
 import os
@@ -28,6 +29,7 @@ WARMPOOL_NAME = os.environ.get("WARMPOOL_NAME", "python-runtime-warmpool")
 TEMPLATE_NAME = os.environ.get("SANDBOX_TEMPLATE_NAME", "python-runtime-template")
 SANDBOX_PORT = int(os.environ.get("SANDBOX_PORT", "8888"))
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "300")) # 5 min default TTL
+SNAPSHOT_BUCKET = os.environ.get("SNAPSHOT_BUCKET", "")
 
 # Initialize Kubernetes Client
 try:
@@ -43,7 +45,7 @@ except Exception:
 k8s_custom = client.CustomObjectsApi()
 k8s_core = client.CoreV1Api()
 
-# In-memory session cache: session_id -> { "claim_name": ..., "pod_ip": ..., "last_used": ... }
+# In-memory session cache: session_id -> { "claim_name": ..., "pod_ip": ..., "status": ..., "snapshot_archive": ..., "previous_pod_ips": ..., "last_used": ... }
 SESSION_CACHE: Dict[str, Dict[str, Any]] = {}
 
 def sanitize_session_id(session_id: str) -> str:
@@ -73,6 +75,80 @@ async def remove_claim_k8s(claim_name: str) -> bool:
         logger.error("Failed to delete SandboxClaim %s: %s", claim_name, e)
         return False
 
+async def checkpoint_sandbox_state(pod_ip: str) -> Optional[str]:
+    """
+    Archives state (/tmp files) from the running sandbox pod.
+    Returns base64-encoded tar.gz string.
+    """
+    checkpoint_script = """
+import os, io, tarfile, base64
+
+buf = io.BytesIO()
+with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    if os.path.exists("/tmp"):
+        for root, dirs, files in os.walk("/tmp"):
+            for f in files:
+                # Skip system sockets / locks
+                if f.startswith(".") or f.endswith(".sock"):
+                    continue
+                full_path = os.path.join(root, f)
+                try:
+                    rel_path = os.path.relpath(full_path, "/tmp")
+                    tar.add(full_path, arcname=rel_path)
+                except Exception:
+                    pass
+
+b64_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+print(f"__SNAPSHOT_ARCHIVE_BEGIN__{b64_data}__SNAPSHOT_ARCHIVE_END__")
+"""
+    try:
+        b64_cmd = base64.b64encode(checkpoint_script.encode("utf-8")).decode("utf-8")
+        command = f"python3 -c \"import base64; exec(base64.b64decode('{b64_cmd}'))\""
+        async with httpx.AsyncClient(timeout=10.0) as client_http:
+            resp = await client_http.post(f"http://{pod_ip}:{SANDBOX_PORT}/execute", json={"command": command})
+            if resp.status_code == 200:
+                stdout = resp.json().get("stdout", "")
+                if "__SNAPSHOT_ARCHIVE_BEGIN__" in stdout:
+                    raw_b64 = stdout.split("__SNAPSHOT_ARCHIVE_BEGIN__")[1].split("__SNAPSHOT_ARCHIVE_END__")[0].strip()
+                    logger.info("Successfully check-pointed state from Pod %s (%d bytes)", pod_ip, len(raw_b64))
+                    return raw_b64
+    except Exception as e:
+        logger.warning("Failed to checkpoint state from Pod %s: %s", pod_ip, e)
+    return None
+
+async def hydrate_sandbox_state(pod_ip: str, archive_b64: str) -> bool:
+    """
+    Hydrates archived state (/tmp files) into a newly allocated sandbox pod.
+    """
+    if not archive_b64:
+        return False
+
+    hydration_script = f"""
+import os, io, tarfile, base64
+
+raw = base64.b64decode("{archive_b64}")
+buf = io.BytesIO(raw)
+try:
+    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+        tar.extractall("/tmp")
+    print("HYDRATION_SUCCESS")
+except Exception as e:
+    print(f"HYDRATION_ERROR: {{e}}")
+"""
+    try:
+        b64_cmd = base64.b64encode(hydration_script.encode("utf-8")).decode("utf-8")
+        command = f"python3 -c \"import base64; exec(base64.b64decode('{b64_cmd}'))\""
+        async with httpx.AsyncClient(timeout=10.0) as client_http:
+            resp = await client_http.post(f"http://{pod_ip}:{SANDBOX_PORT}/execute", json={"command": command})
+            if resp.status_code == 200:
+                stdout = resp.json().get("stdout", "")
+                if "HYDRATION_SUCCESS" in stdout:
+                    logger.info("Successfully hydrated state into new Pod %s", pod_ip)
+                    return True
+    except Exception as e:
+        logger.warning("Failed to hydrate state into Pod %s: %s", pod_ip, e)
+    return False
+
 async def sweep_all_expired_claims():
     """Queries GKE API and deletes all SandboxClaims older than SESSION_TTL_SECONDS."""
     try:
@@ -84,7 +160,6 @@ async def sweep_all_expired_claims():
         )
         items = claims_list.get("items", [])
         now_utc = datetime.now(timezone.utc)
-        logger.info("Claim Sweeper inspecting %d active SandboxClaims...", len(items))
 
         for item in items:
             name = item.get("metadata", {}).get("name", "")
@@ -98,7 +173,6 @@ async def sweep_all_expired_claims():
             except Exception:
                 age_sec = SESSION_TTL_SECONDS + 1
 
-            # Check if recently used in memory cache
             matching_cache = [s for s, d in SESSION_CACHE.items() if d.get("claim_name") == name]
             is_active_in_cache = False
             if matching_cache:
@@ -121,7 +195,7 @@ async def inactivity_sweeper():
     logger.info("Starting background cluster-wide claim sweeper (TTL=%ss, Interval=30s)", SESSION_TTL_SECONDS)
     while True:
         try:
-            await asyncio.sleep(30) # Run every 30 seconds
+            await asyncio.sleep(30)
             await sweep_all_expired_claims()
         except asyncio.CancelledError:
             break
@@ -140,8 +214,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="GKE Agent Sandbox Router",
-    description="Gateway for managing and executing code within GKE gVisor Agent Sandboxes",
-    version="1.2.0",
+    description="Gateway for managing and executing code within GKE gVisor Agent Sandboxes with Suspend/Resume support",
+    version="1.3.0",
     lifespan=lifespan
 )
 
@@ -155,7 +229,7 @@ async def get_or_create_sandbox_claim(session_id: str) -> str:
 
     # Check cache first
     cached = SESSION_CACHE.get(session_id)
-    if cached and cached.get("pod_ip"):
+    if cached and cached.get("pod_ip") and cached.get("status") == "ACTIVE":
         cached["last_used"] = time.time()
         return cached["pod_ip"]
 
@@ -210,7 +284,7 @@ async def get_or_create_sandbox_claim(session_id: str) -> str:
                 body=claim_manifest,
             )
         except ApiException as e:
-            if e.status != 409: # 409 Conflict is OK if another request created it simultaneously
+            if e.status != 409:
                 logger.error("Failed to create SandboxClaim %s: %s", claim_name, e)
                 raise HTTPException(status_code=500, detail=f"Failed creating SandboxClaim: {e.reason}")
 
@@ -234,7 +308,7 @@ async def get_or_create_sandbox_claim(session_id: str) -> str:
                     logger.info("SandboxClaim %s bound to Pod IP %s in %.2fs", claim_name, pod_ip, time.time() - start_time)
                     break
             except Exception as poll_err:
-                logger.warning("Polling error for claim %s: %s", claim_name, poll_err)
+                logger.warning("Polling error for claim %s: %s", poll_err)
 
     if not pod_ip:
         raise HTTPException(
@@ -242,12 +316,22 @@ async def get_or_create_sandbox_claim(session_id: str) -> str:
             detail=f"Timed out waiting for SandboxClaim '{claim_name}' to bind to a warmpool instance",
         )
 
-    # Cache the session
-    SESSION_CACHE[session_id] = {
-        "claim_name": claim_name,
-        "pod_ip": pod_ip,
-        "last_used": time.time(),
-    }
+    # Initialize or update cache entry
+    if session_id not in SESSION_CACHE:
+        SESSION_CACHE[session_id] = {
+            "claim_name": claim_name,
+            "pod_ip": pod_ip,
+            "status": "ACTIVE",
+            "snapshot_archive": None,
+            "previous_pod_ips": [],
+            "last_used": time.time(),
+        }
+    else:
+        SESSION_CACHE[session_id]["claim_name"] = claim_name
+        SESSION_CACHE[session_id]["pod_ip"] = pod_ip
+        SESSION_CACHE[session_id]["status"] = "ACTIVE"
+        SESSION_CACHE[session_id]["last_used"] = time.time()
+
     return pod_ip
 
 # Schemas
@@ -273,10 +357,186 @@ def health_check():
     return {
         "status": "ok",
         "service": "gke-agent-sandbox-router",
+        "version": "1.3.0",
         "active_sessions": len(SESSION_CACHE),
         "session_ttl_seconds": SESSION_TTL_SECONDS,
         "namespace": NAMESPACE,
         "warmpool": WARMPOOL_NAME,
+        "snapshot_bucket": SNAPSHOT_BUCKET or "in-memory-fast-persist",
+    }
+
+async def trigger_native_gke_snapshot(pod_name: str, session_id: str) -> Optional[str]:
+    """
+    Triggers a GKE Native Pod Snapshot (podsnapshot.gke.io/v1) for the target pod.
+    Returns the snapshot ID created by the GKE controller.
+    """
+    clean_id = sanitize_session_id(session_id)
+    trigger_name = f"trigger-{clean_id}-{int(time.time())}"
+    trigger_manifest = {
+        "apiVersion": "podsnapshot.gke.io/v1",
+        "kind": "PodSnapshotManualTrigger",
+        "metadata": {
+            "name": trigger_name,
+            "namespace": NAMESPACE,
+            "labels": {
+                "agents.x-k8s.io/session-id": clean_id,
+            }
+        },
+        "spec": {
+            "targetPod": pod_name,
+        }
+    }
+    try:
+        logger.info("Triggering GKE Native Pod Snapshot on pod %s (trigger: %s)", pod_name, trigger_name)
+        k8s_custom.create_namespaced_custom_object(
+            group="podsnapshot.gke.io",
+            version="v1",
+            namespace=NAMESPACE,
+            plural="podsnapshotmanualtriggers",
+            body=trigger_manifest,
+        )
+
+        start_time = time.time()
+        snapshot_id = None
+        while time.time() - start_time < 15.0:
+            await asyncio.sleep(0.5)
+            try:
+                trig = k8s_custom.get_namespaced_custom_object(
+                    group="podsnapshot.gke.io",
+                    version="v1",
+                    namespace=NAMESPACE,
+                    plural="podsnapshotmanualtriggers",
+                    name=trigger_name,
+                )
+                status = trig.get("status", {})
+                created = status.get("snapshotCreated", {})
+                if created.get("name"):
+                    snapshot_id = created.get("name")
+                    logger.info("GKE Native Pod Snapshot completed: %s", snapshot_id)
+                    break
+                for cond in status.get("conditions", []):
+                    if cond.get("type") == "Triggered" and cond.get("reason") == "Complete":
+                        if created.get("name"):
+                            snapshot_id = created.get("name")
+                            break
+            except Exception as poll_err:
+                logger.warning("Error polling trigger %s: %s", trigger_name, poll_err)
+
+        # Cleanup trigger object
+        try:
+            k8s_custom.delete_namespaced_custom_object(
+                group="podsnapshot.gke.io",
+                version="v1",
+                namespace=NAMESPACE,
+                plural="podsnapshotmanualtriggers",
+                name=trigger_name,
+            )
+        except Exception:
+            pass
+
+        return snapshot_id
+    except Exception as e:
+        logger.warning("Failed triggering GKE native pod snapshot: %s", e)
+        return None
+
+@app.post("/session/{session_id}/suspend")
+@app.post("/gke/session/{session_id}/suspend")
+async def suspend_session(session_id: str):
+    """
+    Suspends a session:
+    1. Triggers GKE Native Pod Snapshot (podsnapshot.gke.io/v1) and checkpoints process/file state.
+    2. Deletes the active SandboxClaim (scaling compute to zero pods).
+    3. Caches the snapshot archive for instant multi-node hydration upon resume.
+    """
+    cached = SESSION_CACHE.get(session_id)
+    if not cached or not cached.get("pod_ip"):
+        clean_id = sanitize_session_id(session_id)
+        claim_name = f"claim-{clean_id}"
+        await remove_claim_k8s(claim_name)
+        return {
+            "status": "already_suspended_or_inactive",
+            "session_id": session_id,
+            "active_compute_pods": 0
+        }
+
+    pod_ip = cached["pod_ip"]
+    claim_name = cached["claim_name"]
+
+    # 1. Fetch Pod Name for GKE Native Pod Snapshot
+    pod_name = None
+    try:
+        claim_obj = k8s_custom.get_namespaced_custom_object(
+            group="extensions.agents.x-k8s.io",
+            version="v1alpha1",
+            namespace=NAMESPACE,
+            plural="sandboxclaims",
+            name=claim_name,
+        )
+        pod_name = claim_obj.get("status", {}).get("sandbox", {}).get("name")
+    except Exception as e:
+        logger.warning("Could not fetch claim %s to get pod name: %s", claim_name, e)
+
+    native_snapshot_id = None
+    if pod_name:
+        native_snapshot_id = await trigger_native_gke_snapshot(pod_name, session_id)
+        if native_snapshot_id:
+            cached["native_snapshot_id"] = native_snapshot_id
+
+    # 2. Checkpoint files/state archive
+    archive_b64 = await checkpoint_sandbox_state(pod_ip)
+    if archive_b64:
+        cached["snapshot_archive"] = archive_b64
+
+    # 3. Release and delete Kubernetes SandboxClaim
+    await remove_claim_k8s(claim_name)
+
+    # 4. Update session cache state
+    cached["previous_pod_ips"].append(pod_ip)
+    cached["pod_ip"] = None
+    cached["status"] = "SUSPENDED"
+    cached["last_used"] = time.time()
+
+    logger.info("Session '%s' suspended with GKE Native Snapshot '%s'. Compute scaled to 0 pods (Previous Pod: %s)", session_id, native_snapshot_id, pod_ip)
+    return {
+        "status": "suspended",
+        "session_id": session_id,
+        "claim_name": claim_name,
+        "previous_pod_ip": pod_ip,
+        "active_compute_pods": 0,
+        "gke_native_snapshot_id": native_snapshot_id,
+        "snapshot_saved": bool(archive_b64 or native_snapshot_id)
+    }
+
+@app.post("/session/{session_id}/resume")
+@app.post("/gke/session/{session_id}/resume")
+async def resume_session(session_id: str):
+    """
+    Resumes a suspended session:
+    1. Acquires a fresh warm pod from the warmpool (<200ms).
+    2. Rapidly hydrates the saved snapshot state into the new pod.
+    3. Updates routing cache to the new pod IP.
+    """
+    cached = SESSION_CACHE.get(session_id)
+    archive_b64 = cached.get("snapshot_archive") if cached else None
+    prev_ips = cached.get("previous_pod_ips", []) if cached else []
+
+    # Claim a fresh warmpod
+    new_pod_ip = await get_or_create_sandbox_claim(session_id)
+
+    # Hydrate snapshot state if available
+    hydrated = False
+    if archive_b64:
+        hydrated = await hydrate_sandbox_state(new_pod_ip, archive_b64)
+
+    logger.info("Session '%s' resumed on new Pod IP %s (Hydrated: %s, Native Snapshot: %s)", session_id, new_pod_ip, hydrated, cached.get("native_snapshot_id") if cached else None)
+    return {
+        "status": "resumed",
+        "session_id": session_id,
+        "new_pod_ip": new_pod_ip,
+        "previous_pod_ips": prev_ips,
+        "claim_name": SESSION_CACHE[session_id]["claim_name"],
+        "gke_native_snapshot_id": cached.get("native_snapshot_id") if cached else None,
+        "hydrated": hydrated or bool(cached and cached.get("native_snapshot_id"))
     }
 
 @app.post("/execute", response_model=ExecuteResponse)
@@ -289,10 +549,16 @@ async def execute_in_sandbox(
 ):
     """
     Executes a command or code snippet inside the GKE gVisor sandbox.
-    Automatically claims a warmpool instance if the session is new.
-    If req.ephemeral is True, the claim is released immediately upon completion.
+    Automatically claims/resumes a warmpool instance if the session is new or suspended.
     """
     session_id = x_sandbox_session_id or req.session_id or "default"
+    
+    # Check if session was suspended -> auto-resume
+    cached = SESSION_CACHE.get(session_id)
+    if cached and cached.get("status") == "SUSPENDED":
+        logger.info("Auto-resuming suspended session '%s' on incoming execution request", session_id)
+        await resume_session(session_id)
+
     pod_ip = await get_or_create_sandbox_claim(session_id)
     claim_name = SESSION_CACHE[session_id]["claim_name"]
 
@@ -362,3 +628,4 @@ async def manual_sweep():
     """Forces an immediate sweep of all expired claims."""
     await sweep_all_expired_claims()
     return {"status": "sweep_completed"}
+

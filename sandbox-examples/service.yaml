@@ -11,7 +11,7 @@ spec:
   template:
     metadata:
       labels:
-        version: "v15-gemini-3-8-flash"
+        version: "v16-suspend-resume"
       annotations:
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/startup-cpu-boost: 'true'

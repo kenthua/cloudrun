@@ -1,0 +1,13 @@
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotPolicy
+metadata:
+  name: gke-agent-snapshot-policy
+  namespace: default
+spec:
+  storageConfigName: gke-agent-snapshot-storage
+  selector:
+    matchLabels:
+      app: agent-sandbox-workload
+  triggerConfig:
+    type: manual
+    postCheckpoint: resume

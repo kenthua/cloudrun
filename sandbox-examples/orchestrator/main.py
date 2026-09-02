@@ -219,6 +219,22 @@ async def delete_session(session_id: str):
     runner: AgentRunner = state["agent_runner"]
     return await runner.delete_session(client, session_id)
 
+@app.post("/session/{session_id}/suspend")
+@app.post("/gke/session/{session_id}/suspend")
+async def suspend_session(session_id: str):
+    """Suspends a GKE session, checkpoints state, and scales active pod compute to 0."""
+    client: httpx.AsyncClient = state["http_client"]
+    runner: AgentRunner = state["agent_runner"]
+    return await runner.suspend_session(client, session_id)
+
+@app.post("/session/{session_id}/resume")
+@app.post("/gke/session/{session_id}/resume")
+async def resume_session(session_id: str):
+    """Resumes a suspended GKE session, claims a fresh warm pod, and hydrates state."""
+    client: httpx.AsyncClient = state["http_client"]
+    runner: AgentRunner = state["agent_runner"]
+    return await runner.resume_session(client, session_id)
+
 # Backward-compatible convenience endpoints
 @app.get("/python")
 async def legacy_python():

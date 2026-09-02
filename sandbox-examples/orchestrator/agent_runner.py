@@ -180,6 +180,28 @@ class AgentRunner:
             logger.error("Error releasing GKE session %s: %s", session_id, e)
             return {"status": "error", "error": str(e)}
 
+    async def suspend_session(self, http_client: httpx.AsyncClient, session_id: str) -> Dict[str, Any]:
+        """Suspends a GKE session, checkpoints state, and scales active pod compute to 0."""
+        if not self.gke_router_url:
+            return {"status": "skipped", "reason": "No GKE router configured"}
+        try:
+            res = await http_client.post(f"{self.gke_router_url}/session/{session_id}/suspend", timeout=15.0)
+            return res.json()
+        except Exception as e:
+            logger.error("Error suspending GKE session %s: %s", session_id, e)
+            return {"status": "error", "error": str(e)}
+
+    async def resume_session(self, http_client: httpx.AsyncClient, session_id: str) -> Dict[str, Any]:
+        """Resumes a suspended GKE session, claims a fresh warm pod, and hydrates state."""
+        if not self.gke_router_url:
+            return {"status": "skipped", "reason": "No GKE router configured"}
+        try:
+            res = await http_client.post(f"{self.gke_router_url}/session/{session_id}/resume", timeout=20.0)
+            return res.json()
+        except Exception as e:
+            logger.error("Error resuming GKE session %s: %s", session_id, e)
+            return {"status": "error", "error": str(e)}
+
     async def run_coding_interaction(
         self,
         http_client: httpx.AsyncClient,

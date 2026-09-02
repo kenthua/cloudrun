@@ -8,6 +8,7 @@ spec:
     metadata:
       labels:
         sandbox-type: python-runtime
+        app: agent-sandbox-workload
     spec:
       runtimeClassName: gvisor # Required
       automountServiceAccountToken: false # Required

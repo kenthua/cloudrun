@@ -89,6 +89,7 @@ The service uses a **Nested Defense-in-Depth** model:
 │   └── package.json               # @computesdk/cloud-run dependency
 │
 ├── scripts/
+│   ├── 00_setup_cluster_prerequisites.sh       # [Setup 0] Create snapshot bucket & configure IAM
 │   ├── 01_build_all_images.sh                  # [Setup 1] Cloud Build all 3 containers with uv
 │   ├── 02_deploy_gke_sandbox.sh                # [Setup 2] Deploy GKE warmpool CRDs & router
 │   ├── 03_deploy_cloud_run.sh                  # [Setup 3] Deploy multi-container Cloud Run service
@@ -96,8 +97,8 @@ The service uses a **Nested Defense-in-Depth** model:
 │   ├── 04_demo_scenario1_cloudrun_sandbox.sh   # [Scenario 1] Bash / cURL raw HTTP runner
 │   ├── 05_demo_scenario2_managed_agent.py      # [Scenario 2] Python programmatic test runner
 │   ├── 05_demo_scenario2_managed_agent.sh      # [Scenario 2] Bash / cURL raw HTTP runner
-│   ├── 06_demo_scenario3_gke_agent_sandbox.py  # [Scenario 3] Python multi-turn stateful test suite
-│   ├── 06_demo_scenario3_gke_agent_sandbox.sh  # [Scenario 3] Bash / cURL raw HTTP runner
+│   ├── 06_demo_scenario3_gke_agent_sandbox.py  # [Scenario 3] Python Suspend & Resume test suite
+│   ├── 06_demo_scenario3_gke_agent_sandbox.sh  # [Scenario 3] Bash / cURL Suspend & Resume runner
 │   └── 07_run_all_scenarios.sh                 # [Test Suite] Runs all scenarios & records to TEST_RESULTS.md
 │
 ├── TEST_RESULTS.md                 # Full recorded execution log of all live test runs
@@ -184,16 +185,9 @@ python3 scripts/05_demo_scenario2_managed_agent.py
 
 ---
 
-### Scenario 3: GKE Agent Sandbox Distributed Warmpool (`POST /gke/exec`)
+### Scenario 3: GKE Agent Sandbox Suspend & Resume (`POST /gke/exec`)
 
-Routes requests across Google Cloud VPC to **GKE Agent Sandbox** warmpools (`extensions.agents.x-k8s.io/v1alpha1`) with sub-second pod checkout:
-
-```bash
-curl -s -X POST "$SERVICE_URL/gke/exec" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"language": "python", "code": "import socket; print(f\"Executed on GKE Sandbox Pod: {socket.gethostname()}\")"}'
-```
+Routes requests across Google Cloud VPC to **GKE Agent Sandbox** warmpools (`extensions.agents.x-k8s.io/v1alpha1`) with scale-to-zero suspension and sub-second multi-node state hydration:
 
 ```mermaid
 flowchart TD
@@ -211,37 +205,44 @@ flowchart TD
         Router -- "1. Auto-claim warm pod\n(SandboxClaim API)" --> Controller["GKE Agent Sandbox Controller"]
         Controller -- "Checks out in <200ms" --> Warmpool["SandboxWarmPool\n(python-runtime-warmpool)"]
         Router -- "2. Direct HTTP proxy\n(POST http://<pod-ip>:8888/execute)" --> SandboxPod["gVisor Sandbox Pod\n(python-runtime-sandbox:v0.1.0)"]
+        Router -. "3. Suspend / Hibernate\n(0 compute pods)" .-> Storage["GCS Snapshot Storage\n(gs://agent-sandbox-snapshots-*)"]
+        Storage -. "4. Instant Hydration\n(<50ms on fresh pod)" .-> SandboxPod2["Fresh Warm Pod B"]
     end
 ```
 
-#### Key Highlights of Scenario 3:
-1. **Sub-second Checkout:** Claims a pre-warmed gVisor sandbox instance from `SandboxWarmPool/python-runtime-warmpool` in `<200ms`.
-2. **Persistent Multi-Turn State:** Filesystem and process state persist across turns using `session_id` (e.g. saving state in Turn 1, calculating norms in Turn 2).
-3. **Autonomous Gemini Loop:** Gemini model synthesizes code, calls `execute_sandbox_code`, inspects execution results from the GKE sandbox, and self-corrects runtime errors.
-4. **Lifecycle & Cleanup:** `SandboxClaim` resources can be released on demand or automatically cleaned up.
+#### 📖 The 6-Step Story of Scenario 3:
+1. **Create Work in Sandbox A**: The agent writes a sales dataset (`/tmp/sales_report.json`) on **Pod A**.
+2. **Put Sandbox to Sleep (Hibernate / 0 Cost)**: The router snapshots the session state to GCS and deletes the `SandboxClaim`. Active compute drops to **0 pods**.
+3. **Wake Up Sandbox (Resume)**: A fresh warm pod (**Pod B**) is claimed from the warmpool in `<200ms`.
+4. **Instant Hydration**: The router hydrates the saved dataset into **Pod B** in `<50ms`.
+5. **AI Agent Solves Follow-Up**: **Gemini 3.8 Flash** inspects the restored file on **Pod B** and computes the highest-performing region.
+6. **Clean Up**: The session claim is deleted, returning resources to the warm pool.
 
 #### Preparing the GKE Agent Sandbox Environment:
 
-1. **Create a gVisor-Enabled Node Pool (Required for GKE Standard)**:
+1. **Set Up Storage Prerequisites & Snapshot Bucket**:
    ```bash
-   gcloud container node-pools create gvisor-agents-e2 \
+   ./scripts/00_setup_cluster_prerequisites.sh
+   ```
+
+2. **Create a gVisor-Enabled N2 Node Pool (Required for GKE Standard & Snapshots)**:
+   ```bash
+   gcloud container node-pools create gvisor-agents-n2 \
        --cluster ${CLUSTER_NAME} \
        --region ${REGION} \
-       --machine-type e2-standard-4 \
-       --image-type cos_containerd \
+       --machine-type n2-standard-4 \
+       --image-type COS_CONTAINERD \
        --sandbox type=gvisor \
+       --enable-private-nodes \
+       --workload-metadata GKE_METADATA \
+       --service-account "minimal-node@${PROJECT_ID}.iam.gserviceaccount.com" \
        --enable-autoscaling \
-       --min-nodes 1 \
-       --max-nodes 5
+       --min-nodes 0 \
+       --max-nodes 5 \
+       --num-nodes 0 \
+       --node-locations "${REGION}-c"
    ```
-   > *Note: For GKE Autopilot clusters, node pools and gVisor sandboxing are provisioned automatically on demand when workloads request `runtimeClassName: gvisor`.*
-
-2. **Enable Agent Sandbox on the GKE Cluster**:
-   ```bash
-   gcloud beta container clusters update ${CLUSTER_NAME} \
-       --region ${REGION} \
-       --enable-agent-sandbox
-   ```
+   > *Note: N2 series is required for GKE pod snapshots and hardware hypervisor memory virtualization. For GKE Autopilot clusters, node pools and gVisor sandboxing are provisioned automatically on demand when workloads request `runtimeClassName: gvisor`.*
 
 3. **Deploy Blueprint & Warm Pool**:
    ```bash
@@ -262,7 +263,7 @@ flowchart TD
 #### Run the Automated Scenario 3 Demonstration:
 
 ```bash
-# Python runner:
+# Python runner (Step-by-step interactive test):
 python3 scripts/06_demo_scenario3_gke_agent_sandbox.py
 
 # Or Bash / cURL runner:
