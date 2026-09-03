@@ -20,6 +20,18 @@ echo "Snapshot Bucket: gs://${BUCKET_NAME}"
 echo "Node SA:         ${NODE_SA}"
 echo "=============================================================================="
 
+# 0. Enable GKE Native Pod Snapshots on Cluster
+echo -e "\n--- [0/5] Ensuring Cluster Has Pod Snapshots Enabled ---"
+if gcloud beta container clusters describe "${CLUSTER_NAME}" --region "${REGION}" --format="value(podSnapshotConfig.enabled)" 2>/dev/null | grep -iq "true"; then
+    echo "✅ Pod Snapshots are already enabled on cluster '${CLUSTER_NAME}'."
+else
+    echo "Enabling Pod Snapshots on cluster '${CLUSTER_NAME}'..."
+    gcloud beta container clusters update "${CLUSTER_NAME}" \
+        --region "${REGION}" \
+        --enable-pod-snapshots --quiet
+    echo "✅ Pod Snapshots enabled on cluster."
+fi
+
 # 1. Create Cloud Storage Snapshot Bucket (Hierarchical Namespace enabled for sub-second I/O)
 echo -e "\n--- [1/5] Ensuring Cloud Storage HNS Snapshot Bucket Exists ---"
 SNAPSHOTS_HNS_BUCKET="gke-pod-snapshots-${PROJECT_ID}"
@@ -74,6 +86,10 @@ if gcloud container node-pools describe gvisor-agents-n2 --cluster "${CLUSTER_NA
     echo "✅ Node pool 'gvisor-agents-n2' exists."
 else
     echo "Creating node pool 'gvisor-agents-n2' (n2-standard-4, gVisor sandbox, 0..5 nodes)..."
+    EXTRA_NODE_FLAGS=()
+    if [ -n "${NODE_LOCATIONS:-}" ]; then
+        EXTRA_NODE_FLAGS+=(--node-locations "${NODE_LOCATIONS}")
+    fi
     gcloud container node-pools create gvisor-agents-n2 \
         --cluster "${CLUSTER_NAME}" \
         --region "${REGION}" \
@@ -87,13 +103,23 @@ else
         --min-nodes 0 \
         --max-nodes 5 \
         --num-nodes 0 \
-        --node-locations "${REGION}-c"
+        "${EXTRA_NODE_FLAGS[@]}"
     echo "✅ Node pool 'gvisor-agents-n2' created."
 fi
 
-# 4. Apply Native Pod Snapshot CRDs
+# 4. Apply Native Pod Snapshot CRDs with Project-Specific Bucket
 echo -e "\n--- [4/5] Applying Native GKE Pod Snapshot CRDs ---"
-kubectl apply -f k8s/00-snapshot-storage-config.yaml
+cat <<EOF | kubectl apply -f -
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: gke-agent-snapshot-storage
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: "${SNAPSHOTS_HNS_BUCKET}"
+      path: "snapshots"
+EOF
 kubectl apply -f k8s/00-snapshot-policy.yaml
 
 # 5. Verify Cluster Connectivity & GKE Agent Sandbox CRDs

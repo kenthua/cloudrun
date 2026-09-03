@@ -71,12 +71,14 @@ The service uses a **Nested Defense-in-Depth** model:
 │   └── main.py                    # FastAPI gateway managing SandboxClaims & execution proxies
 │
 ├── k8s/
-│   ├── 00-sandbox-template.yaml   # Official GKE SandboxTemplate blueprint (gVisor runtime)
-│   ├── 00-sandbox-warmpool.yaml   # Official GKE SandboxWarmPool spec (pre-warmed pods)
-│   ├── 00-sandbox-claim.yaml      # Sample SandboxClaim resource definition
-│   ├── 01-rbac.yaml               # ServiceAccount, ClusterRole, and Bindings for Sandbox router
-│   ├── 02-router-deployment.yaml  # 2-replica deployment for gke-sandbox-router
-│   └── 03-router-service.yaml     # Internal Load Balancer service (10.128.0.78:8080)
+│   ├── 00-snapshot-storage-config.yaml # GKE Native PodSnapshotStorageConfig (HNS GCS bucket)
+│   ├── 00-snapshot-policy.yaml        # GKE Native PodSnapshotPolicy (app: agent-sandbox-workload)
+│   ├── 00-sandbox-template.yaml       # Official GKE SandboxTemplate blueprint (gVisor runtime)
+│   ├── 00-sandbox-warmpool.yaml       # Official GKE SandboxWarmPool spec (pre-warmed pods)
+│   ├── 00-sandbox-claim.yaml          # Sample SandboxClaim resource definition
+│   ├── 01-rbac.yaml                   # ServiceAccount, ClusterRole, and Bindings for Sandbox router
+│   ├── 02-router-deployment.yaml      # 2-replica deployment for gke-sandbox-router
+│   └── 03-router-service.yaml         # Internal Load Balancer service (10.128.0.78:8080)
 │
 ├── orchestrator/
 │   ├── Dockerfile                 # Python 3.11 container with uv for fast installs
@@ -89,9 +91,9 @@ The service uses a **Nested Defense-in-Depth** model:
 │   └── package.json               # @computesdk/cloud-run dependency
 │
 ├── scripts/
-│   ├── 00_setup_cluster_prerequisites.sh       # [Setup 0] Create snapshot bucket & configure IAM
+│   ├── 00_setup_cluster_prerequisites.sh       # [Setup 0] Create HNS snapshot bucket & configure IAM
 │   ├── 01_build_all_images.sh                  # [Setup 1] Cloud Build all 3 containers with uv
-│   ├── 02_deploy_gke_sandbox.sh                # [Setup 2] Deploy GKE warmpool CRDs & router
+│   ├── 02_deploy_gke_sandbox.sh                # [Setup 2] Deploy snapshot CRDs, warmpool & router
 │   ├── 03_deploy_cloud_run.sh                  # [Setup 3] Deploy multi-container Cloud Run service
 │   ├── 04_demo_scenario1_cloudrun_sandbox.py   # [Scenario 1] Python programmatic test runner
 │   ├── 04_demo_scenario1_cloudrun_sandbox.sh   # [Scenario 1] Bash / cURL raw HTTP runner
@@ -99,7 +101,8 @@ The service uses a **Nested Defense-in-Depth** model:
 │   ├── 05_demo_scenario2_managed_agent.sh      # [Scenario 2] Bash / cURL raw HTTP runner
 │   ├── 06_demo_scenario3_gke_agent_sandbox.py  # [Scenario 3] Python Suspend & Resume test suite
 │   ├── 06_demo_scenario3_gke_agent_sandbox.sh  # [Scenario 3] Bash / cURL Suspend & Resume runner
-│   └── 07_run_all_scenarios.sh                 # [Test Suite] Runs all scenarios & records to TEST_RESULTS.md
+│   ├── 07_run_all_scenarios.sh                 # [Test Suite] Runs all scenarios & records to TEST_RESULTS.md
+│   └── 99_cleanup_resources.sh                 # [Teardown] Cleans up sandbox claims, CRDs, and router
 │
 ├── TEST_RESULTS.md                 # Full recorded execution log of all live test runs
 ├── service.yaml                   # Knative multi-container Cloud Run deployment configuration
@@ -205,14 +208,14 @@ flowchart TD
         Router -- "1. Auto-claim warm pod\n(SandboxClaim API)" --> Controller["GKE Agent Sandbox Controller"]
         Controller -- "Checks out in <200ms" --> Warmpool["SandboxWarmPool\n(python-runtime-warmpool)"]
         Router -- "2. Direct HTTP proxy\n(POST http://<pod-ip>:8888/execute)" --> SandboxPod["gVisor Sandbox Pod\n(python-runtime-sandbox:v0.1.0)"]
-        Router -. "3. Suspend / Hibernate\n(0 compute pods)" .-> Storage["GCS Snapshot Storage\n(gs://agent-sandbox-snapshots-*)"]
+        Router -. "3. Suspend / Hibernate\n(0 compute pods)" .-> Storage["GCS Snapshot Storage (HNS)\n(gs://gke-pod-snapshots-*)"]
         Storage -. "4. Instant Hydration\n(<50ms on fresh pod)" .-> SandboxPod2["Fresh Warm Pod B"]
     end
 ```
 
 #### 📖 The 6-Step Story of Scenario 3:
 1. **Create Work in Sandbox A**: The agent writes a sales dataset (`/tmp/sales_report.json`) on **Pod A**.
-2. **Put Sandbox to Sleep (Hibernate / 0 Cost)**: The router snapshots the session state to GCS and deletes the `SandboxClaim`. Active compute drops to **0 pods**.
+2. **Put Sandbox to Sleep (Hibernate / 0 Cost)**: GKE Native Pod Snapshot (`podsnapshot.gke.io/v1`) checkpoints kernel memory to GCS and deletes the `SandboxClaim`. Active compute drops to **0 pods**.
 3. **Wake Up Sandbox (Resume)**: A fresh warm pod (**Pod B**) is claimed from the warmpool in `<200ms`.
 4. **Instant Hydration**: The router hydrates the saved dataset into **Pod B** in `<50ms`.
 5. **AI Agent Solves Follow-Up**: **Gemini 3.8 Flash** inspects the restored file on **Pod B** and computes the highest-performing region.
@@ -239,17 +242,18 @@ flowchart TD
        --enable-autoscaling \
        --min-nodes 0 \
        --max-nodes 5 \
-       --num-nodes 0 \
-       --node-locations "${REGION}-c"
+       --num-nodes 0
    ```
    > *Note: N2 series is required for GKE pod snapshots and hardware hypervisor memory virtualization. For GKE Autopilot clusters, node pools and gVisor sandboxing are provisioned automatically on demand when workloads request `runtimeClassName: gvisor`.*
 
-3. **Deploy Blueprint & Warm Pool**:
+3. **Deploy Blueprint, Pod Snapshots & Warm Pool**:
    ```bash
-   # Deploy SandboxTemplate (gVisor blueprint)
-   kubectl apply -f k8s/00-sandbox-template.yaml
+   # Deploy Native Pod Snapshot Storage & Policy
+   kubectl apply -f k8s/00-snapshot-storage-config.yaml
+   kubectl apply -f k8s/00-snapshot-policy.yaml
 
-   # Deploy SandboxWarmPool (pre-warmed ready replicas)
+   # Deploy SandboxTemplate (gVisor blueprint) & WarmPool
+   kubectl apply -f k8s/00-sandbox-template.yaml
    kubectl apply -f k8s/00-sandbox-warmpool.yaml
    ```
 
@@ -345,7 +349,9 @@ gcloud beta run deploy sandbox-sidecar \
 
 *Or via direct `kubectl` commands:*
 ```bash
-# 1. Agent Sandbox Warmpool
+# 1. Native Pod Snapshots & Agent Sandbox Warmpool
+kubectl apply -f k8s/00-snapshot-storage-config.yaml
+kubectl apply -f k8s/00-snapshot-policy.yaml
 kubectl apply -f k8s/00-sandbox-template.yaml
 kubectl apply -f k8s/00-sandbox-warmpool.yaml
 

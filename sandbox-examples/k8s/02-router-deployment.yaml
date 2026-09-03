@@ -30,7 +30,7 @@ spec:
         - name: SANDBOX_PORT
           value: "8888"
         - name: SNAPSHOT_BUCKET
-          value: "agent-sandbox-snapshots-kenthua-alto-agents"
+          value: "gke-pod-snapshots-kenthua-alto-agents"
         ports:
         - containerPort: 8080
           name: http

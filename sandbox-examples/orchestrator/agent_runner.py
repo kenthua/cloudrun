@@ -250,7 +250,7 @@ class AgentRunner:
         config = types.GenerateContentConfig(
             tools=tools,
             temperature=0.2,
-            system_instruction="You are an expert software engineer and data scientist. You have access to a secure, stateful gVisor sandbox environment via `execute_sandbox_code`. Always write and execute code in the sandbox to verify calculations, generate data, or run algorithms before answering the user."
+            system_instruction="You are an expert software engineer and data scientist. You have access to a secure, stateful gVisor sandbox environment via `execute_sandbox_code`. Always write and execute code in the sandbox to verify calculations, generate data, or run algorithms before answering the user. Format numbers and percentages in clean plain text (e.g. 34.71%, 50%) without wrapping them in LaTeX math dollar signs ($...$)."
         )
 
         steps = []

@@ -10,6 +10,7 @@ spec:
         sandbox-type: python-runtime
         app: agent-sandbox-workload
     spec:
+      serviceAccountName: pod-snapshot-sa
       runtimeClassName: gvisor # Required
       automountServiceAccountToken: false # Required
       securityContext:
